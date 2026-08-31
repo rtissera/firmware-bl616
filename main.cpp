@@ -370,12 +370,21 @@ static void uart1_rx_task(void *pvParameters)
                 } else
                     pos++;
 
-            } else if (type == 6) {              // real CD sector request (lba[31:0])
+            } else if (type == 6) {              // real CD sector request (is_audio[7:0] lba[23:0])
                 buffer[pos-4] = ch;
                 if (pos == 7) {
-                    uint32_t lba = ((uint32_t)buffer[0] << 24) | ((uint32_t)buffer[1] << 16)
-                                  | ((uint32_t)buffer[2] << 8) | buffer[3];
-                    pcecd_serve_sector(lba);
+                    // Real (2026-08-31g): byte 0 was always 0 (top byte of a real CD LBA,
+                    // genuinely unused as address bits, real CD max is ~330K sectors/19
+                    // bits) -- repurposed on the FPGA side (iosys_bl616.v's own
+                    // SEND_CD_SECTOR_REQ) to carry SECTOR_IS_AUDIO. See cd_bridge.vhd's
+                    // own SECTOR_IS_AUDIO port comment for the real FPGA-side design.
+                    bool is_audio = (buffer[0] & 0x01) != 0;
+                    uint32_t lba = ((uint32_t)buffer[1] << 16) | ((uint32_t)buffer[2] << 8)
+                                  | buffer[3];
+                    if (is_audio)
+                        pcecd_serve_audio_sector(lba);
+                    else
+                        pcecd_serve_sector(lba);
                     pos = 0;
                 } else
                     pos++;

@@ -29,6 +29,15 @@
 #define PCECD_USER_DATA_OFFSET   16
 #define PCECD_USER_DATA_BYTES    2048
 
+// Real raw CD-DA (audio-track) sector: unlike Mode-1 data tracks, an audio track's raw
+// unit has NO sync/header/ECC structure at all -- all 2352 bytes are direct 16-bit-LE
+// stereo PCM (588 samples), starting at byte 0 of the raw unit (no offset to skip),
+// confirmed against libchdr's own real per-track metadata (AUDIO vs MODE1 `type`) and
+// every real .chd this session tested. Matches cd_bridge.vhd's real CDDA_FIFO byte
+// order exactly (see that file's own port comment): L-lsb, L-msb, R-lsb, R-msb per
+// sample, sent in the same byte order the raw unit already stores them in.
+#define PCECD_AUDIO_BYTES        2352
+
 // Real state for the currently-mounted disc. One disc at a time, same real assumption
 // every other core loader in this firmware makes (fcore is a single global FIL too).
 static USB_NOCACHE_RAM_SECTION FIL f_chd;
@@ -57,11 +66,19 @@ static void pcecd_send_mount(uint8_t mounted) {
     taskEXIT_CRITICAL();
 }
 
-static void pcecd_send_sector_chunk(uint8_t chunk_idx, const uint8_t *data /* 1024 bytes */) {
+// Real, generalized (2026-08-31g, was hardcoded to 1024 bytes/chunk for the Mode-1 data
+// path only): `chunk_idx` is passed straight through to iosys_bl616.v's own 0x10 RX
+// handler, which real-ends the sector on EITHER `chunk_idx==1 && data_cnt==1024` (the
+// original, unchanged, real 2x1024B Mode-1 data-sector shape) OR `chunk_idx==0xFF` at
+// the frame's own last byte (a real, backward-compatible sentinel for any other
+// chunk count/size -- see that file's own 0x10 handler comment). The real 2352-byte
+// CD-DA path below uses the sentinel; the real 2048-byte data path keeps its original
+// chunk_idx values (0, 1) and is byte-for-byte unchanged on the wire.
+static void pcecd_send_sector_chunk(uint8_t chunk_idx, const uint8_t *data, uint16_t length) {
     taskENTER_CRITICAL();
-    fpga_tx_header(0x10, 1026);
+    fpga_tx_header(0x10, (int)length + 2);
     fpga_tx_byte(chunk_idx);
-    for (int i = 0; i < 1024; i++)
+    for (uint16_t i = 0; i < length; i++)
         fpga_tx_byte(data[i]);
     taskEXIT_CRITICAL();
 }
@@ -137,8 +154,46 @@ void pcecd_serve_sector(uint32_t lba) {
 
     const uint8_t *raw = pcecd_hunk_buf + (uint32_t)sector_in_hunk * PCECD_RAW_UNIT_BYTES
                           + PCECD_USER_DATA_OFFSET;
-    pcecd_send_sector_chunk(0, raw);
-    pcecd_send_sector_chunk(1, raw + 1024);
+    pcecd_send_sector_chunk(0, raw, 1024);
+    pcecd_send_sector_chunk(1, raw + 1024, 1024);
+}
+
+// Real raw CD-DA sector serving (2026-08-31g) -- same real bounds check and hunk-cache
+// path as pcecd_serve_sector() above, but no PCECD_USER_DATA_OFFSET skip (see
+// PCECD_AUDIO_BYTES' own comment: audio tracks have no header to strip) and a real
+// 2352-byte length, split into two 1176-byte chunks (2352 divides evenly, both chunks
+// comfortably under the wire protocol's real ~2047-byte single-frame cap). The second
+// chunk is tagged with the real 0xFF "final chunk" sentinel (see
+// pcecd_send_sector_chunk's own comment) -- cd_bridge.vhd doesn't know or care that
+// this is 1176+1176 rather than 1024+1024, only that SECTOR_DATA_LAST pulses on the
+// real last byte.
+void pcecd_serve_audio_sector(uint32_t lba) {
+    if (!pcecd_chd || pcecd_sectors_per_hunk == 0) {
+        DEBUG("pcecd_serve_audio_sector: no disc mounted, ignoring LBA %u\n", (unsigned)lba);
+        return;
+    }
+    if (lba >= pcecd_toc_lba[100]) {
+        DEBUG("pcecd_serve_audio_sector: LBA %u past real lead-out %u, ignoring\n",
+              (unsigned)lba, (unsigned)pcecd_toc_lba[100]);
+        return;
+    }
+
+    uint32_t hunknum = lba / pcecd_sectors_per_hunk;
+    uint32_t sector_in_hunk = lba % pcecd_sectors_per_hunk;
+
+    if (hunknum != pcecd_cached_hunk) {
+        chd_error err = chd_read(pcecd_chd, hunknum, pcecd_hunk_buf);
+        if (err != CHDERR_NONE) {
+            DEBUG("pcecd_serve_audio_sector: chd_read(hunk %u) failed: %s\n",
+                  (unsigned)hunknum, chd_error_string(err));
+            return;
+        }
+        pcecd_cached_hunk = hunknum;
+    }
+
+    const uint8_t *raw = pcecd_hunk_buf + (uint32_t)sector_in_hunk * PCECD_RAW_UNIT_BYTES;
+    pcecd_send_sector_chunk(0, raw, PCECD_AUDIO_BYTES / 2);
+    pcecd_send_sector_chunk(0xFF, raw + PCECD_AUDIO_BYTES / 2, PCECD_AUDIO_BYTES / 2);
 }
 
 // Real TOC walk, computing real per-track start LBA + control byte using the exact same
