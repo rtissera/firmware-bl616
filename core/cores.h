@@ -27,6 +27,8 @@ extern int loadgba(const char *fname);
 extern int loadmd(const char *fname);
 extern int loadsms(const char *fname);
 extern int loadpc(const char *fname);
+extern int loadpce(const char *fname);
+extern int loadpcecd(const char *fname);
 
 extern bool find_core_for_board(std::string &fname, const char *core_name);
 

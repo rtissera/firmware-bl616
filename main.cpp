@@ -31,6 +31,8 @@ extern "C" {
 #include "utils.h"
 #include "cores.h"
 #include "overlay.h"
+#include "chd_fatfs.h"
+#include "core/pcecd.h"
 #include "init.h"
 #include "menu_manager.h"
 
@@ -368,6 +370,16 @@ static void uart1_rx_task(void *pvParameters)
                 } else
                     pos++;
 
+            } else if (type == 6) {              // real CD sector request (lba[31:0])
+                buffer[pos-4] = ch;
+                if (pos == 7) {
+                    uint32_t lba = ((uint32_t)buffer[0] << 24) | ((uint32_t)buffer[1] << 16)
+                                  | ((uint32_t)buffer[2] << 8) | buffer[3];
+                    pcecd_serve_sector(lba);
+                    pos = 0;
+                } else
+                    pos++;
+
             } else {
                 pos = 0; // Reset if we get out of sync
             }
@@ -554,6 +566,7 @@ static void print_system_info(void) {
 }
 
 // Initialize things, then start main_task and uart1_rx_task to do actual work
+
 int main(void)
 {
     /* Board init */

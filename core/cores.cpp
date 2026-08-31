@@ -37,12 +37,23 @@ void init_core_list() {
         {3, "Game Boy Advance", "gba", "gbatang.bin", loadgba, create_default_menu},
         {4, "MegaDrive / Genesis", "genesis", "mdtang.bin", loadmd, create_default_menu},
         {5, "Sega Master System", "sms", "smstang.bin", loadsms, create_default_menu},
-        {6, "IBM PC/XT", "pc", "pctang.bin", loadpc, create_pcxt_menu}
+        {6, "IBM PC/XT", "pc", "pctang.bin", loadpc, create_pcxt_menu},
+        {7, "PC Engine", "pce", "pcetang.bin", loadpce, create_default_menu},
+        // Real (2026-08-31): same real bitstream as id 7 (pcetang.bin) -- cd_bridge.vhd's
+        // SCSI target is baked into every real CD combo build, just fed by a different
+        // real loader here. See pcetang_cd_scsi_plan.md for the full protocol design.
+        {8, "PC Engine CD", "pcenginecd", "pcetang.bin", loadpcecd, create_default_menu}
     };
 
     main_menu_config = {1,2,
 #if defined(TANG_MEGA60K) || defined(TANG_MEGA138K) || defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
         3,4,5,6,
+#endif
+#if defined(TANG_PRIMER25K)
+        // pcetang: only gw_sh-verified on this board so far (see
+        // pcetang project memory pcetang_hw_bringup.md) -- not enabled on
+        // other boards' menus until built and verified there too.
+        7,8,
 #endif
         -1, -2
     };
