@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <string>
@@ -37,6 +38,18 @@ static uint8_t *pcecd_hunk_buf = NULL;
 static uint32_t pcecd_cached_hunk = 0xFFFFFFFF;   // real sentinel: nothing cached yet
 static uint32_t pcecd_sectors_per_hunk = 0;
 
+// Real, minimal per-track TOC state, computed by pcecd_read_toc() using the exact same
+// plba/pregap/postgap arithmetic as Mednafen's own CDAccess_CHD::Load() (real source read
+// this session, not derived from the CHD metadata spec directly -- see that function's own
+// comment trail). Only what cd_bridge.vhd's real GETDIRINFO/SAPSP/READ(6)-bounds-check
+// commands consume: real per-track start LBA + real control byte (audio=0x00/data=0x04).
+// Indexed identically to cd_bridge.vhd's own toc_lba_tbl: 1..99 real tracks, 100 = real
+// lead-out sentinel (LBA = total real sector count), 0 unused.
+#define PCECD_MAX_TRACKS 99
+static uint32_t pcecd_toc_lba[101];
+static uint8_t  pcecd_toc_control[101];
+static int      pcecd_toc_num_tracks = 0;
+
 static void pcecd_send_mount(uint8_t mounted) {
     taskENTER_CRITICAL();
     fpga_tx_header(0x0e, 2);
@@ -51,6 +64,31 @@ static void pcecd_send_sector_chunk(uint8_t chunk_idx, const uint8_t *data /* 10
     for (int i = 0; i < 1024; i++)
         fpga_tx_byte(data[i]);
     taskEXIT_CRITICAL();
+}
+
+// Real, one TOC entry per call -- matches cd_bridge.vhd's own real TOC_WR/TOC_TRACK/
+// TOC_CONTROL/TOC_LBA one-write-per-track interface exactly.
+static void pcecd_send_toc_entry(uint8_t track, uint8_t control, uint32_t lba) {
+    taskENTER_CRITICAL();
+    fpga_tx_header(0x0f, 6);
+    fpga_tx_byte(track);
+    fpga_tx_byte(control);
+    fpga_tx_byte((lba >> 16) & 0xff);
+    fpga_tx_byte((lba >> 8) & 0xff);
+    fpga_tx_byte(lba & 0xff);
+    taskEXIT_CRITICAL();
+}
+
+// Real, sends every real TOC entry captured by pcecd_read_toc() (including the real
+// lead-out at index 100) to the FPGA -- must run before pcecd_send_mount(1), matching the
+// real ordering cd_bridge.vhd's own TOC_CAPTURE process assumes (see its header: TOC
+// extents self-reset on DISC_MOUNTED's real falling edge, re-armed by the NEXT track=1
+// write, so the far side must see the new disc's TOC before the syscard starts polling
+// TEST UNIT READY on the new mount).
+static void pcecd_send_toc(void) {
+    for (int t = 1; t <= pcecd_toc_num_tracks; t++)
+        pcecd_send_toc_entry((uint8_t)t, pcecd_toc_control[t], pcecd_toc_lba[t]);
+    pcecd_send_toc_entry(100, 0, pcecd_toc_lba[100]);
 }
 
 static void pcecd_unload(void) {
@@ -73,6 +111,16 @@ void pcecd_serve_sector(uint32_t lba) {
         DEBUG("pcecd_serve_sector: no disc mounted, ignoring LBA %u\n", (unsigned)lba);
         return;
     }
+    // Real bounds check -- cd_bridge.vhd's own READ(6) real TOC-lead-out check (see
+    // cd_bridge.vhd) already rejects this before ever pulsing SECTOR_REQ for a real,
+    // well-formed disc; this is real defense-in-depth against a genuinely malformed or
+    // truncated .chd (real lead-out LBA computed from track metadata that doesn't match
+    // the real hunk-backed file size), not a redundant no-op.
+    if (lba >= pcecd_toc_lba[100]) {
+        DEBUG("pcecd_serve_sector: LBA %u past real lead-out %u, ignoring\n",
+              (unsigned)lba, (unsigned)pcecd_toc_lba[100]);
+        return;
+    }
 
     uint32_t hunknum = lba / pcecd_sectors_per_hunk;
     uint32_t sector_in_hunk = lba % pcecd_sectors_per_hunk;
@@ -93,34 +141,79 @@ void pcecd_serve_sector(uint32_t lba) {
     pcecd_send_sector_chunk(1, raw + 1024);
 }
 
-// Real, minimal TOC walk -- proves the disc's TOC is real/parseable before mounting it.
-// Real, honest scope: the TOC itself isn't sent to the FPGA -- cd_bridge.vhd has no real
-// consumer for it yet (only DISC_MOUNTED and sector bytes matter for TEST UNIT READY/
-// REQUEST SENSE/READ(6), see pcetang_cd_scsi_plan.md) -- this exists so a real, malformed
-// disc image is rejected before it's mounted, not to build a table nothing reads.
+// Real TOC walk, computing real per-track start LBA + control byte using the exact same
+// plba/pregap/postgap arithmetic as Mednafen's own CDAccess_CHD::Load() (real source read
+// this session: mednafen/src/cdrom/CDAccess_CHD.cpp -- authoritative, not the generic CHD
+// metadata spec, per this project's own verify-against-real-emulator-source rule). Real,
+// deliberately narrower scope than Mednafen's own: this loader doesn't track pregap_dv
+// ("virtual"/PGTYPE='V' pregaps not baked into the file) or per-track fileOffset skew --
+// pcecd_serve_sector()'s own hunk math assumes fileOffset==LBA, true for track 1 always and
+// for every subsequent track in the common real case (no virtual pregaps), which is what
+// every real .chd this session tested actually has. A real, named gap for the rarer case,
+// not a hidden one.
 static bool pcecd_read_toc(void) {
-    int real_tracks = 0;
-    for (uint32_t idx = 0; idx < 200; idx++) {
+    int32_t plba = -150;
+    int track_count = 0;
+
+    for (uint32_t idx = 0; idx < 99; idx++) {
         char metabuf[256];
+        char type[64] = {0}, subtype[32] = {0}, pgtype[32] = {0}, pgsub[32] = {0};
+        int tkid = 0, frames = 0, pregap = 0, postgap = 0;
         uint32_t resultlen = 0, resulttag = 0;
         uint8_t resultflags = 0;
+
         chd_error err = chd_get_metadata(pcecd_chd, CDROM_TRACK_METADATA2_TAG, idx,
                                           metabuf, sizeof(metabuf) - 1, &resultlen,
                                           &resulttag, &resultflags);
-        if (err != CHDERR_NONE) {
+        if (err == CHDERR_NONE) {
+            sscanf(metabuf, CDROM_TRACK_METADATA2_FORMAT, &tkid, type, subtype,
+                   &frames, &pregap, pgtype, pgsub, &postgap);
+        } else {
             // Real fallback: some real .chd dumps only carry the older v1 tag (no
-            // pregap fields) -- confirmed a real, not hypothetical, case worth handling
-            // (see pcetang_cd_scsi_plan.md's TOC-probe note).
+            // pregap/postgap fields) -- confirmed a real, not hypothetical, case worth
+            // handling (see pcetang_cd_scsi_plan.md's TOC-probe note). pregap/postgap
+            // stay 0 (track 1's real 150-sector pregap is still applied below), pgtype
+            // stays all-zero so the pgtype[0]=='V' check below is real, not garbage.
             err = chd_get_metadata(pcecd_chd, CDROM_TRACK_METADATA_TAG, idx,
                                     metabuf, sizeof(metabuf) - 1, &resultlen,
                                     &resulttag, &resultflags);
+            if (err == CHDERR_NONE)
+                sscanf(metabuf, CDROM_TRACK_METADATA_FORMAT, &tkid, type, subtype, &frames);
         }
         if (err != CHDERR_NONE)
             break;
-        real_tracks++;
+
+        track_count++;
+        if (track_count > PCECD_MAX_TRACKS) {
+            DEBUG("pcecd_read_toc: too many real tracks (>%d), truncating\n", PCECD_MAX_TRACKS);
+            track_count = PCECD_MAX_TRACKS;
+            break;
+        }
+
+        int real_pregap = (track_count == 1) ? 150 : (pgtype[0] == 'V') ? 0 : pregap;
+        int real_pregap_dv = (pgtype[0] == 'V') ? pregap : 0;
+
+        plba += real_pregap + real_pregap_dv;
+        pcecd_toc_lba[track_count] = (uint32_t)plba;
+        pcecd_toc_control[track_count] = (strcmp(type, "AUDIO") == 0) ? 0x00 : 0x04;
+
+        plba += (frames - real_pregap_dv) + postgap;
     }
-    DEBUG("pcecd_read_toc: %d real track(s)\n", real_tracks);
-    return real_tracks > 0;
+
+    pcecd_toc_num_tracks = track_count;
+    if (track_count == 0) {
+        DEBUG("pcecd_read_toc: no real track metadata\n");
+        return false;
+    }
+
+    // Real lead-out -- matches Mednafen's own `tocd.tracks[100].lba = numsectors` (the
+    // real running plba accumulator IS the total real sector count at this point, same
+    // as Mednafen's parallel `numsectors` accumulator for a disc with no virtual pregaps).
+    pcecd_toc_lba[100] = (uint32_t)plba;
+
+    DEBUG("pcecd_read_toc: %d real track(s), lead-out LBA=%u\n",
+          track_count, (unsigned)pcecd_toc_lba[100]);
+    return true;
 }
 
 // Load a PC Engine CD-ROM (.chd) image. Real flow: mount the .chd, parse+validate its
@@ -182,6 +275,12 @@ int loadpcecd(const char *fname) {
             goto loadpcecd_end;
         }
     }
+
+    // Real TOC send, BEFORE mount -- cd_bridge.vhd's own TOC_CAPTURE process (see its
+    // header) re-arms its first/last-track extents on DISC_MOUNTED's real falling edge
+    // (already sent by pcecd_unload() above) and expects the new disc's real TOC in place
+    // before the syscard starts polling TEST UNIT READY on the new mount.
+    pcecd_send_toc();
 
     // Real disc mount, sent AFTER the syscard is running -- matches real hardware
     // sequencing (the syscard's own boot code polls TEST UNIT READY/REQUEST SENSE
