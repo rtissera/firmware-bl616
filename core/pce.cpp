@@ -1,9 +1,12 @@
 #define _GNU_SOURCE
 #include <string.h>      // for strcasestr
+#include <stdio.h>
 
 #include "utils.h"
 #include "cores.h"
 #include "overlay.h"
+
+extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
 
 // Load a PC Engine / TurboGrafx-16 HuCard ROM (pcetang core)
 // return 0 if successful
@@ -12,20 +15,36 @@ int loadpce(const char *fname) {
     unsigned int size;
     int r = 1;
     DEBUG("loadpce start\n");
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "loadpce: start fname=%s", fname);
+        file_log(buf);
+    }
 
     // check extension .pce
     char *p = strcasestr(fname, ".pce");
     if (p == NULL) {
+        file_log("loadpce: not a .pce, abort");
         overlay_message("Only .pce supported", 1);
         goto loadpce_end;
     }
 
     r = f_open(&fcore, fname, FA_READ);
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "loadpce: f_open returned %d", r);
+        file_log(buf);
+    }
     if (r) {
         overlay_status("Cannot open file");
         goto loadpce_end;
     }
     size = get_file_size(fname);
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "loadpce: size=%u", size);
+        file_log(buf);
+    }
 
     // Some .pce dumps carry a 512-byte copier header ahead of the real HuCard
     // image (same convention real emulators use to detect it): a clean dump's
@@ -46,6 +65,7 @@ int loadpce(const char *fname) {
 
     // Send rom content
     if ((r = f_lseek(&fcore, off)) != FR_OK) {
+        file_log("loadpce: seek failure");
         overlay_status("Seek failure");
         goto loadpce_pce_end;
     }
@@ -64,14 +84,25 @@ int loadpce(const char *fname) {
     } while (br == 1024 /*BLOCK_SIZE*/ && total < size);
 
     DEBUG("loadpce: %d bytes\n", total);
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "loadpce: sent total=%u bytes, r=%d", total, r);
+        file_log(buf);
+    }
     overlay_status("Success");
     core_running = true;
 
     overlay(0);		// turn off OSD
+    file_log("loadpce: overlay off, core_running=true, success");
 
 loadpce_pce_end:
     set_loading_state(0);   // turn off game loading, this starts the core
     f_close(&fcore);
 loadpce_end:
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "loadpce: returning %d", r);
+        file_log(buf);
+    }
     return r;
 }

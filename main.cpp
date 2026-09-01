@@ -83,6 +83,35 @@ int __attribute__((weak)) putchar(int ch) {
     return ch;
 }
 
+// TEMP diagnostic: raw UART1 console (the SDK's own debug console, set via
+// bflb_uart_set_console in init_gpio_and_uart), independent of FPGA config
+// state, so we can see boot progress even when the FPGA never gets configured.
+// TEMP diagnostic: log to a real file on the mounted drive instead of the
+// screen -- overlay text is timing-sensitive and unreadable on a fast TV
+// redraw, especially once a game core's own video output takes over from
+// the menu core. Uses its own FIL handle so it never collides with fcore
+// (the global handle used for ROM/core streaming).
+FIL flog;
+bool flog_open = false;
+void file_log(const char *msg) {
+    if (!flog_open) {
+        if (f_open(&flog, (std::string(drv) + "debug.log").c_str(), FA_WRITE | FA_OPEN_APPEND) != FR_OK)
+            return;
+        flog_open = true;
+    }
+    UINT bw;
+    f_write(&flog, msg, strlen(msg), &bw);
+    f_write(&flog, "\r\n", 2, &bw);
+    f_sync(&flog);   // flush immediately so the log survives a hang/crash
+}
+
+void uart_dbg(const char *s) {
+    file_log(s);
+    if (!uart1_dev) return;
+    bflb_uart_put(uart1_dev, (uint8_t*)s, strlen(s));
+    bflb_uart_put(uart1_dev, (uint8_t*)"\r\n", 2);
+}
+
 
 /////////////////////////////////////////////////////////////////////////////////
 // Core loading and other file system operations
@@ -137,9 +166,15 @@ static int menu_loadrom(const char *dir) {
     // find core info entry
     core_info *core = NULL;
     string path = fname.substr(fname.find(":")+1);
-    for (int i = 0; i < core_info_list.size(); i++) {
+    for (size_t i = 0; i < core_info_list.size(); i++) {
         core_info *c = &core_info_list[i];
-        if (path.find(c->rom_dir) == 0) {
+        // match on a full path segment ("pc/" not just "pc") -- a loose
+        // prefix check here matches "pc" (PC/XT) against "pce/..." and
+        // "pcenginecd/..." paths too, since "pc" is a literal prefix of
+        // both; PC/XT sits earlier in core_info_list so it always won the
+        // race, silently loading pctang.bin for PCE/PCE-CD ROMs (real,
+        // observed on Console 60K, 2026-09-01).
+        if (path.find(std::string(c->rom_dir) + "/") == 0) {
             overlay_status("ROM for: %s", c->display_name);
             core = c;
             break;
@@ -159,26 +194,54 @@ static int menu_loadrom(const char *dir) {
             string fname_core;
             if (find_core_for_board(fname_core, core->core_file)) {
                 // load core
-                fpga_program(fname_core.c_str());
+                overlay_cursor(0, 10);
+                overlay_printf("DBG fname=%s id=%d          ", fname_core.c_str(), core->id);
+                {
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "menu_loadrom: loading core fname=%s want_id=%d", fname_core.c_str(), core->id);
+                    file_log(buf);
+                }
+                bool prog_ok = fpga_program(fname_core.c_str());
+                overlay_cursor(0, 11);
+                overlay_printf("DBG fpga_program=%d          ", prog_ok ? 1 : 0);
+                {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "menu_loadrom: fpga_program returned %d", prog_ok ? 1 : 0);
+                    file_log(buf);
+                }
                 _overlay_on = 1;
 
                 // allow 2 seconds for core to start
                 uint64_t start = bflb_mtimer_get_time_ms();
+                int16_t last_seen = -99;
                 while (bflb_mtimer_get_time_ms() - start < 2000) {
                     send_blank_packet();
                     active_core = get_core_id();
+                    last_seen = active_core;
                     if (active_core == core->id)
                         break;
                 }
-            } 
+                overlay_cursor(0, 12);
+                overlay_printf("DBG poll last_active_core=%d          ", last_seen);
+                {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "menu_loadrom: poll done, last_active_core=%d want=%d", last_seen, core->id);
+                    file_log(buf);
+                }
+            }
         }
 
         // Attemp to load ROM
         if (active_core == core->id) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "menu_loadrom: calling load_rom fname=%s", fname.c_str());
+            file_log(buf);
             overlay_status("Loading ROM: %s\n", fname.c_str());
             core->load_rom(fname.c_str());
+            file_log("menu_loadrom: load_rom returned");
             return 1;
         } else {
+            file_log("menu_loadrom: Core failed to load (active_core != core->id)");
             overlay_status("Core failed to load\n");
             delay(1000);
             return -1;
@@ -243,12 +306,11 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
         return 0;
     }
 
-    if ((joy1 & 0x10) || (joy2 & 0x10)) {
-        if (*active > 0) (*active)--;
-    }
-    if ((joy1 & 0x20) || (joy2 & 0x20)) {
-        if (*active < len-1) (*active)++;
-    }
+    // Check buttons BEFORE direction: a controller that reports both a
+    // direction bit and a button bit in the same poll (debounce overlap,
+    // e.g. real DS2-style pads over PMOD) must not shift *active on the
+    // exact poll that also confirms/cancels -- that produces an off-by-one
+    // selection (real, observed on Console 60K's DS2 controller, 2026-09-01).
     if ((joy1 & 0x40) || (joy2 & 0x40))
         return 3;      // previous page
     if ((joy1 & 0x80) || (joy2 & 0x80))
@@ -257,6 +319,13 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
         return 4;      // button A pressed
     if ((joy1 & 0x1) || (joy2 & 0x1))
         return 1;      // button B pressed
+
+    if ((joy1 & 0x10) || (joy2 & 0x10)) {
+        if (*active > 0) (*active)--;
+    }
+    if ((joy1 & 0x20) || (joy2 & 0x20)) {
+        if (*active < len-1) (*active)++;
+    }
 
     overlay_cursor(0, start_line + (*active));
     overlay_printf(">");
@@ -411,30 +480,39 @@ static void main_task(void *pvParameters)
     uint64_t start = bflb_mtimer_get_time_ms();
     FRESULT res;
     overlay_status("Mounting sd card...", drv);
+    uart_dbg("BOOT: mounting sd:");
     while ((res = f_mount(&fs, "sd:", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 500)
         delay(100);
 
     if (res == FR_OK) {
         overlay_status("SD card mounted in %d ms", bflb_mtimer_get_time_ms() - start);
+        uart_dbg("BOOT: sd: mounted");
     } else  {
         overlay_status("SD not found. Mounting USB...");
+        uart_dbg("BOOT: sd: not found, mounting usb:");
         drv = "usb:";
         start = bflb_mtimer_get_time_ms();
-        while ((res = f_mount(&fs, "usb:", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 2000)
+        while ((res = f_mount(&fs, "usb:", 1)) != FR_OK && bflb_mtimer_get_time_ms() - start < 15000)
             delay(100);
         if (res != FR_OK) {
             overlay_status("Failed to mount USB drive");
+            uart_dbg("BOOT: usb: mount FAILED (timeout)");
         } else {
             overlay_status("USB drive mounted in %d ms", bflb_mtimer_get_time_ms() - start);
+            uart_dbg("BOOT: usb: mounted");
         }
     }
 
     // load monitor core at startup
     string fname;
+    uart_dbg("BOOT: looking for monitor.bin");
     if (find_core_for_board(fname, "monitor.bin")) {
-        fpga_program(fname.c_str());
+        uart_dbg("BOOT: monitor.bin found, calling fpga_program");
+        bool ok = fpga_program(fname.c_str());
+        uart_dbg(ok ? "BOOT: fpga_program returned OK" : "BOOT: fpga_program returned FAIL");
     } else {
         overlay_status("No monitor.bin found for board.");
+        uart_dbg("BOOT: monitor.bin NOT FOUND");
     }
 
     int line_start;
@@ -470,7 +548,7 @@ static void main_task(void *pvParameters)
                 for (int i = 0; i < menu_cnt; i++) {
                     overlay_cursor(2, line++);
                     if (main_menu_config[i] > 0) {
-                        for (int j = 0; core_info_list[j].id != 0; j++) {
+                        for (size_t j = 0; j < core_info_list.size(); j++) {
                             if (core_info_list[j].id == main_menu_config[i]) {
                                 overlay_printf("%s", core_info_list[j].display_name);
                                 break;
@@ -531,7 +609,7 @@ static void main_task(void *pvParameters)
         if (main_menu_config[choice] > 0) {
             // Load rom or core from USB drive
             struct core_info *core = NULL;
-            for (int i = 0; core_info_list[i].id != 0; i++) {
+            for (size_t i = 0; i < core_info_list.size(); i++) {
                 if (core_info_list[i].id == main_menu_config[choice]) {
                     core = &core_info_list[i];
                     break;
@@ -584,6 +662,7 @@ int main(void)
 
     // Initialize GPIO and UART
     init_gpio_and_uart();
+    uart_dbg("BOOT: init_gpio_and_uart done, console alive");
 
     print_system_info();
 

@@ -11,6 +11,8 @@
 #include "chd/chd_fatfs.h"
 #include "libchdr/chd.h"
 
+extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
+
 // Real PC Engine CD-ROM loader (pcetang core) -- see pcetang_cd_scsi_plan.md for the full
 // real wire-protocol design (0x0e mount / 0x10 sector chunk / 0x06 sector request) and the
 // real 2448-byte-raw-sector-to-2048-byte-user-data extraction this file implements, both
@@ -280,9 +282,11 @@ static bool pcecd_read_toc(void) {
 int loadpcecd(const char *fname) {
     int r = 1;
     DEBUG("loadpcecd start: %s\n", fname);
+    file_log("loadpcecd: start");
 
     char *p = strcasestr(fname, ".chd");
     if (p == NULL) {
+        file_log("loadpcecd: not a .chd, abort");
         overlay_message("Only .chd supported", 1);
         goto loadpcecd_end;
     }
@@ -291,6 +295,9 @@ int loadpcecd(const char *fname) {
 
     {
         chd_error err = chd_fatfs_open(fname, &f_chd, &pcecd_chd);
+        char buf[96];
+        snprintf(buf, sizeof(buf), "loadpcecd: chd_fatfs_open err=%d (%s)", (int)err, chd_error_string(err));
+        file_log(buf);
         if (err != CHDERR_NONE) {
             overlay_status("Cannot open CHD: %s", chd_error_string(err));
             goto loadpcecd_end;
@@ -299,31 +306,50 @@ int loadpcecd(const char *fname) {
 
     pcecd_hdr = chd_get_header(pcecd_chd);
     if (pcecd_hdr->unitbytes == 0 || (pcecd_hdr->hunkbytes % pcecd_hdr->unitbytes) != 0) {
+        file_log("loadpcecd: bad sector layout, abort");
         overlay_status("Unexpected CHD sector layout");
         chd_close(pcecd_chd);
         pcecd_chd = NULL;
         goto loadpcecd_end;
     }
     pcecd_sectors_per_hunk = pcecd_hdr->hunkbytes / pcecd_hdr->unitbytes;
+    {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "loadpcecd: hunkbytes=%u unitbytes=%u sectors_per_hunk=%u",
+            (unsigned)pcecd_hdr->hunkbytes, (unsigned)pcecd_hdr->unitbytes, (unsigned)pcecd_sectors_per_hunk);
+        file_log(buf);
+    }
 
     pcecd_hunk_buf = (uint8_t *)malloc(pcecd_hdr->hunkbytes);
     if (!pcecd_hunk_buf) {
+        file_log("loadpcecd: malloc for hunk buf FAILED");
         overlay_status("Out of memory for CD hunk buffer");
         chd_close(pcecd_chd);
         pcecd_chd = NULL;
         goto loadpcecd_end;
     }
+    file_log("loadpcecd: hunk buf malloc ok");
     pcecd_cached_hunk = 0xFFFFFFFF;
 
     if (!pcecd_read_toc()) {
+        file_log("loadpcecd: pcecd_read_toc FAILED, abort");
         overlay_status("No real track metadata in CHD");
         pcecd_unload();
         goto loadpcecd_end;
     }
+    file_log("loadpcecd: TOC read ok");
 
     {
         std::string syscard = std::string(drv) + "bios/syscard3.pce";
+        FILINFO fno;
+        FRESULT sres = f_stat(syscard.c_str(), &fno);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "loadpcecd: syscard=%s res=%d sz=%lu", syscard.c_str(), (int)sres,
+            sres == FR_OK ? (unsigned long)fno.fsize : 0UL);
+        file_log(buf);
         r = loadpce(syscard.c_str());
+        snprintf(buf, sizeof(buf), "loadpcecd: loadpce(syscard) returned %d", r);
+        file_log(buf);
         if (r != 0) {
             overlay_status("Failed to load syscard3.pce");
             pcecd_unload();
@@ -336,13 +362,20 @@ int loadpcecd(const char *fname) {
     // (already sent by pcecd_unload() above) and expects the new disc's real TOC in place
     // before the syscard starts polling TEST UNIT READY on the new mount.
     pcecd_send_toc();
+    file_log("loadpcecd: TOC sent");
 
     // Real disc mount, sent AFTER the syscard is running -- matches real hardware
     // sequencing (the syscard's own boot code polls TEST UNIT READY/REQUEST SENSE
     // before assuming a disc is present, per cd_bridge.vhd's own real command trace).
     pcecd_send_mount(1);
+    file_log("loadpcecd: mount sent, done");
     r = 0;
 
 loadpcecd_end:
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "loadpcecd: returning %d", r);
+        file_log(buf);
+    }
     return r;
 }

@@ -10,11 +10,16 @@
  */
 
 #include <string.h>
+#include <stdio.h>
 #include "programmer.h"
 #include <FreeRTOS.h>
 #include "task.h"
 #include "utils.h"
 #include "overlay.h"
+
+extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
+
+void uart_dbg(const char *s);   // TEMP diagnostic, defined in main.cpp
 
 #define JTAG_MAX_CHAIN 8
 
@@ -891,6 +896,11 @@ bool writeSRAM_send(const uint8_t *data, uint32_t length, bool last) {
 }
 
 bool writeSRAM_end() {
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "writeSRAM_end: pre-teardown status=0x%08x", readStatusReg());
+        file_log(buf);
+    }
 
     // printf("Status after XFER_WRITE: 0x%08x\r\n", readStatusReg());
     // send checksum
@@ -905,16 +915,40 @@ bool writeSRAM_end() {
 	send_command(NOOP); // noop 0x02
 
 	uint32_t usercode = readUserCode();
-	uint32_t status_reg = readStatusReg();
-    overlay_status("Usercode=0x%08x, status=0x%08x\r\n", usercode, status_reg);
 
-	if (status_reg & STATUS_DONE_FINAL) {
-		// printf("DONE\r\n");
-		return true;
-	} else {
-		// printf("FAIL\r\n");
-		return false;
-	}
+	// Real fix: DONE is not guaranteed to be set the instant the last bit
+	// clocks in -- a bigger bitstream needs a bit more real internal
+	// CRC/startup time before the status register reflects completion. A
+	// single immediate read here caught a 935KB core (monitor) fine but
+	// failed a 1.5MB core (pcetang) every time, even though every byte
+	// streamed correctly -- real, observed on Console 60K, 2026-09-01.
+	// Poll for up to 100ms instead of reading once.
+	uint32_t status_reg = 0;
+	uint64_t start = bflb_mtimer_get_time_us();
+	do {
+		status_reg = readStatusReg();
+		if (status_reg & STATUS_DONE_FINAL)
+			break;
+	} while (bflb_mtimer_get_time_us() - start < 100000);
+
+    overlay_status("Usercode=0x%08x, status=0x%08x\r\n", usercode, status_reg);
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+            "writeSRAM_end: usercode=0x%08x status=0x%08x DONE=%d CRC=%d BADCMD=%d IDFAIL=%d TIMEOUT=%d ERASE=%d PREAMBLE=%d READY=%d",
+            usercode, status_reg,
+            (status_reg & STATUS_DONE_FINAL) != 0,
+            (status_reg & STATUS_CRC_ERROR) != 0,
+            (status_reg & STATUS_BAD_COMMAND) != 0,
+            (status_reg & STATUS_ID_VERIFY_FAILED) != 0,
+            (status_reg & STATUS_TIMEOUT) != 0,
+            (status_reg & STATUS_MEMORY_ERASE) != 0,
+            (status_reg & STATUS_PREAMBLE) != 0,
+            (status_reg & STATUS_READY) != 0);
+        file_log(buf);
+    }
+
+	return (status_reg & STATUS_DONE_FINAL) != 0;
 }
 
 void fpgaStatus() {
@@ -965,34 +999,48 @@ bool fpga_program(const char *fname) {
         return false;
     }
     bool res = false;
+    bool sram_end_ok = false;
 
 	enable_jtag_pins();
+    uart_dbg("PROG: jtag pins enabled, detecting chain");
 
     chain_len = detectChain(JTAG_MAX_CHAIN);
-    if (chain_len == 0 || (    idcodes[0] != IDCODE_GW5AT_60 
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "PROG: chain_len=%d idcode0=%08x", chain_len, (unsigned)idcodes[0]);
+        uart_dbg(buf);
+    }
+    if (chain_len == 0 || (    idcodes[0] != IDCODE_GW5AT_60
                             && idcodes[0] != IDCODE_GWAST_138
                             && idcodes[0] != IDCODE_GW5A_25
                             && idcodes[0] != IDCODE_GW2A_18)) {
         overlay_printf("No known board detected, IDCODE=%08x\n", idcodes[0]);
+        uart_dbg("PROG: unknown/no IDCODE, aborting");
         goto load_core_close;
     }
 
     if (!eraseSRAM()) {
         overlay_printf("Failed to erase SRAM\n");
+        uart_dbg("PROG: eraseSRAM #1 FAILED");
         goto load_core_close;
     }
+    uart_dbg("PROG: eraseSRAM #1 ok");
 
     // 138K needs erasing twice
     overlay_status("Erasing again...");
     if (!eraseSRAM()) {
         overlay_printf("Failed to erase SRAM 2nd time\n");
+        uart_dbg("PROG: eraseSRAM #2 FAILED");
         goto load_core_close;
-    }    
+    }
+    uart_dbg("PROG: eraseSRAM #2 ok, starting write");
 
     if (!writeSRAM_start()) {
         overlay_printf("Failed to start write SRAM\n");
+        uart_dbg("PROG: writeSRAM_start FAILED");
         goto load_core_close;
     }
+    uart_dbg("PROG: writeSRAM_start ok, streaming file");
 
     BYTE *fbuf_cached;
     fbuf_cached = (BYTE*)malloc(BLOCK_SIZE);
@@ -1017,11 +1065,17 @@ bool fpga_program(const char *fname) {
         if (bytes < BLOCK_SIZE) break;
     }
     jtag_exit_gpio_out_mode();
-    if (!writeSRAM_end()) {
+    sram_end_ok = writeSRAM_end();
+    taskEXIT_CRITICAL();
+    {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "PROG: streamed total=%d/%d bytes, writeSRAM_end=%d", (int)total, len, sram_end_ok ? 1 : 0);
+        uart_dbg(buf);
+    }
+    if (!sram_end_ok) {
         overlay_status("Failed to program SRAM\n");
         goto load_core_close;
     }
-    taskEXIT_CRITICAL();
 
 #else
     taskENTER_CRITICAL();

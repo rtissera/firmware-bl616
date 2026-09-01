@@ -1,10 +1,13 @@
 #include <vector>
 #include <string>
+#include <stdio.h>
 #include "cores.h"
 
 #include "ff.h"
 #include "menu_manager.h"
 #include "overlay.h"
+
+extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
 
 // null-terminated list of core info
 std::vector<core_info> core_info_list;
@@ -49,9 +52,9 @@ void init_core_list() {
 #if defined(TANG_MEGA60K) || defined(TANG_MEGA138K) || defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
         3,4,5,6,
 #endif
-#if defined(TANG_PRIMER25K)
-        // pcetang: only gw_sh-verified on this board so far (see
-        // pcetang project memory pcetang_hw_bringup.md) -- not enabled on
+#if defined(TANG_PRIMER25K) || defined(TANG_CONSOLE60K) || defined(TANG_NANO20K)
+        // pcetang: gw_sh-verified on these boards (see pcetang project
+        // memory pcetang_hw_bringup.md / status matrix) -- not enabled on
         // other boards' menus until built and verified there too.
         7,8,
 #endif
@@ -70,13 +73,27 @@ bool find_core_for_board(std::string &fname, const char *core_name) {
     // check sd|usb:cores/${BOARD_NAME}/${core_name}
     fname = std::string(drv) + "cores/" + BOARD_NAME + "/" + core_name;
     FILINFO fno;
-    if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
+    FRESULT res1 = f_stat(fname.c_str(), &fno);
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "try1=%s res=%d sz=%lu", fname.c_str(), (int)res1,
+            res1 == FR_OK ? (unsigned long)fno.fsize : 0UL);
+        file_log(buf);
+    }
+    if (res1 == FR_OK && fno.fsize > 0) {
         return true;
     }
 
     // check sd|usb:cores/${core_name}
     fname = std::string(drv) + "cores/" + core_name;
-    if (f_stat(fname.c_str(), &fno) == FR_OK && fno.fsize > 0) {
+    FRESULT res2 = f_stat(fname.c_str(), &fno);
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "try2=%s res=%d sz=%lu", fname.c_str(), (int)res2,
+            res2 == FR_OK ? (unsigned long)fno.fsize : 0UL);
+        file_log(buf);
+    }
+    if (res2 == FR_OK && fno.fsize > 0) {
         return true;
     }
     return false;
