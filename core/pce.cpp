@@ -5,6 +5,7 @@
 #include "utils.h"
 #include "cores.h"
 #include "overlay.h"
+#include "pcecd.h"
 
 extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
 
@@ -105,4 +106,20 @@ loadpce_end:
         file_log(buf);
     }
     return r;
+}
+
+// PC Engine and PC Engine CD share one bitstream (pcetang.bin) and one menu entry --
+// extension is the real discriminator between a HuCard dump (.pce) and a CD image
+// (.chd), checked here before either loader's own file-open path runs.
+int loadpce_dispatch(const char *fname) {
+    if (strcasestr(fname, ".chd") != NULL)
+        return loadpcecd(fname);
+    // Drop any disc left mounted from a prior .chd load -- but only if something
+    // actually is mounted. pcecd_unload() always sends a mount(0) frame to the FPGA,
+    // which is fine once the CD core is already listening (its 3 existing callers)
+    // but not right after a fresh fpga_program(), before loadpce() below has even
+    // reached set_loading_state(1).
+    if (pcecd_is_mounted())
+        pcecd_unload();
+    return loadpce(fname);
 }

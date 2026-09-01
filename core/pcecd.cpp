@@ -110,7 +110,11 @@ static void pcecd_send_toc(void) {
     pcecd_send_toc_entry(100, 0, pcecd_toc_lba[100]);
 }
 
-static void pcecd_unload(void) {
+bool pcecd_is_mounted(void) {
+    return pcecd_chd != NULL;
+}
+
+void pcecd_unload(void) {
     if (pcecd_chd) {
         chd_close(pcecd_chd);
         pcecd_chd = NULL;
@@ -292,6 +296,7 @@ int loadpcecd(const char *fname) {
     }
 
     pcecd_unload();   // real: drop any previously mounted disc first
+    file_log("loadpcecd: pcecd_unload done");
 
     {
         chd_error err = chd_fatfs_open(fname, &f_chd, &pcecd_chd);

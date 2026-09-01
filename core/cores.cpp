@@ -41,11 +41,19 @@ void init_core_list() {
         {4, "MegaDrive / Genesis", "genesis", "mdtang.bin", loadmd, create_default_menu},
         {5, "Sega Master System", "sms", "smstang.bin", loadsms, create_default_menu},
         {6, "IBM PC/XT", "pc", "pctang.bin", loadpc, create_pcxt_menu},
-        {7, "PC Engine", "pce", "pcetang.bin", loadpce, create_default_menu},
-        // Real (2026-08-31): same real bitstream as id 7 (pcetang.bin) -- cd_bridge.vhd's
-        // SCSI target is baked into every real CD combo build, just fed by a different
-        // real loader here. See pcetang_cd_scsi_plan.md for the full protocol design.
-        {8, "PC Engine CD", "pcenginecd", "pcetang.bin", loadpcecd, create_default_menu}
+        // Real (2026-09-01): PC Engine and PC Engine CD unified into one entry --
+        // one real bitstream (pcetang.bin, cd_bridge.vhd's SCSI target is baked into
+        // every CD combo build regardless of what's loaded), one CORE_ID (0x0008,
+        // matches all 3 CD boards' VHDL). loadpce_dispatch() (pce.cpp) picks loadpce
+        // vs loadpcecd by file extension (.pce vs .chd) at load time. rom_dir "pce"
+        // is only this entry's browse root (see main.cpp's menu_loadrom call site,
+        // which opens the drive root instead for this one core so the chooser can
+        // reach both pce/ and pcenginecd/ -- FileChooser confines navigation to
+        // rootdir's own subtree, so a single-dir root can't reach both); ownership
+        // matching in menu_loadrom() short-circuits on .pce/.chd before the generic
+        // rom_dir-prefix loop, see pcetang_cd_scsi_plan.md for the protocol this
+        // shares with the CD path.
+        {8, "PC Engine", "pce", "pcetang.bin", loadpce_dispatch, create_default_menu}
     };
 
     main_menu_config = {1,2,
@@ -56,7 +64,7 @@ void init_core_list() {
         // pcetang: gw_sh-verified on these boards (see pcetang project
         // memory pcetang_hw_bringup.md / status matrix) -- not enabled on
         // other boards' menus until built and verified there too.
-        7,8,
+        8,
 #endif
         -1, -2
     };

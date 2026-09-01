@@ -5,6 +5,15 @@
 // chunk/0x06 sector request), verified against 3 real .chd dumps before this was written.
 
 extern int loadpcecd(const char *fname);
+// Real, idempotent disc-eject: safe to call with nothing mounted, but always sends a
+// mount(0) frame to the FPGA -- fine for its 3 existing callers (all run once the
+// active core is already the CD core and listening), NOT fine to call blind right
+// after a fresh fpga_program() before the core has reached its own loading-state
+// setup. Exposed (with pcecd_is_mounted() below) so loadpce_dispatch() (pce.cpp) can
+// clear stale CD state before running a HuCard -- PCE and PCE-CD now share one menu
+// entry, so switching between them no longer forces an FPGA reprogram in between.
+extern void pcecd_unload(void);
+extern bool pcecd_is_mounted(void);
 
 // Real sector-request handlers, called from main.cpp's uart1_rx_task on a real 0x06 frame
 // (cd_bridge.vhd's own SECTOR_REQ, relayed over UART by iosys_bl616.v). `lba` is a real

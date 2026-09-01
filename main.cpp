@@ -36,6 +36,8 @@ extern "C" {
 #include "init.h"
 #include "menu_manager.h"
 
+extern "C" char *strcasestr(const char *haystack, const char *needle);
+
 // Uncomment this to enable UART console (use with caution. it may interfere with MCU-FPGA communication)
 #define UART_CONSOLE
 
@@ -166,7 +168,13 @@ static int menu_loadrom(const char *dir) {
     // find core info entry
     core_info *core = NULL;
     string path = fname.substr(fname.find(":")+1);
-    for (size_t i = 0; i < core_info_list.size(); i++) {
+    // PC Engine's unified entry (id 8) owns both .pce (pce/) and .chd (pcenginecd/) --
+    // extension is the real discriminator, checked first so a .chd under pcenginecd/
+    // doesn't need to match a rom_dir prefix that entry no longer solely owns.
+    if (strcasestr(path.c_str(), ".pce") || strcasestr(path.c_str(), ".chd")) {
+        core = find_core_by_id(8);
+    }
+    for (size_t i = 0; core == NULL && i < core_info_list.size(); i++) {
         core_info *c = &core_info_list[i];
         // match on a full path segment ("pc/" not just "pc") -- a loose
         // prefix check here matches "pc" (PC/XT) against "pce/..." and
@@ -616,7 +624,13 @@ static void main_task(void *pvParameters)
                 }
             }
             if (core) {
-                std::string dir = std::string(drv).append(core->rom_dir);
+                // PC Engine's unified entry (id 8) owns both pce/ (.pce) and
+                // pcenginecd/ (.chd) -- FileChooser can't navigate above the dir it's
+                // opened with, so browse from the drive root instead of rom_dir for
+                // this one core, matching PC/XT's existing (active_core == 6)
+                // special-case just below.
+                std::string dir = (core->id == 8) ? std::string(drv)
+                                                   : std::string(drv).append(core->rom_dir);
                 menu_loadrom(dir.c_str());
             }
         } else if (main_menu_config[choice] == -1) {
