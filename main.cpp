@@ -28,13 +28,14 @@ extern "C" {
 #include "file_chooser.h"
 #include "programmer.h"
 #include "usb_gamepad.h"
-#include "utils.h"
+#include "tc_utils.h"
 #include "cores.h"
 #include "overlay.h"
 #include "chd_fatfs.h"
 #include "core/pcecd.h"
 #include "init.h"
 #include "menu_manager.h"
+#include "wifi_debug.h"
 
 extern "C" char *strcasestr(const char *haystack, const char *needle);
 
@@ -95,7 +96,27 @@ int __attribute__((weak)) putchar(int ch) {
 // (the global handle used for ROM/core streaming).
 FIL flog;
 bool flog_open = false;
+// Live debug output over UART0 (2026-09-06). UART0 is GPIO21/22, brought up at 2Mbaud
+// by board_init(), and on Console 60K it leaves the board through the second USB-C as a
+// CH340 USB-serial port -- so this streams straight to a terminal on a dev PC, with no
+// SD-card swapping. Deliberately UART0 and NOT UART1: UART1 is the live MCU<->FPGA
+// protocol link, and writing log text into it corrupts that protocol (uart_dbg() used
+// to do exactly that -- fixed below).
+// Never blocks on a missing device: if UART0 isn't up, this is a no-op.
+void dbg_uart_puts(const char *s) {
+    if (!uart0_dev) {
+        uart0_dev = bflb_device_get_by_name("uart0");
+        if (!uart0_dev) return;
+    }
+    bflb_uart_put(uart0_dev, (uint8_t*)s, strlen(s));
+    bflb_uart_put(uart0_dev, (uint8_t*)"\r\n", 2);
+}
+
 void file_log(const char *msg) {
+    // Live copy first: this works even before any drive is mounted, and still gets the
+    // line out if the SD write below fails or the board hangs immediately after.
+    dbg_uart_puts(msg);
+
     if (!flog_open) {
         if (f_open(&flog, (std::string(drv) + "debug.log").c_str(), FA_WRITE | FA_OPEN_APPEND) != FR_OK)
             return;
@@ -108,10 +129,10 @@ void file_log(const char *msg) {
 }
 
 void uart_dbg(const char *s) {
+    // Was writing to uart1_dev -- the FPGA protocol link -- which injected raw log text
+    // into the MCU<->core byte stream. Now goes to the SD log and UART0 only (file_log
+    // calls dbg_uart_puts itself).
     file_log(s);
-    if (!uart1_dev) return;
-    bflb_uart_put(uart1_dev, (uint8_t*)s, strlen(s));
-    bflb_uart_put(uart1_dev, (uint8_t*)"\r\n", 2);
 }
 
 
@@ -173,6 +194,10 @@ static int menu_loadrom(const char *dir) {
     // doesn't need to match a rom_dir prefix that entry no longer solely owns.
     if (strcasestr(path.c_str(), ".pce") || strcasestr(path.c_str(), ".chd")) {
         core = find_core_by_id(8);
+        char buf[160];
+        snprintf(buf, sizeof(buf), "menu_loadrom: .pce/.chd extension match, path=%s core=%p", path.c_str(), (void*)core);
+        file_log(buf);
+        wifi_log(buf);
     }
     for (size_t i = 0; core == NULL && i < core_info_list.size(); i++) {
         core_info *c = &core_info_list[i];
@@ -235,6 +260,7 @@ static int menu_loadrom(const char *dir) {
                     char buf[64];
                     snprintf(buf, sizeof(buf), "menu_loadrom: poll done, last_active_core=%d want=%d", last_seen, core->id);
                     file_log(buf);
+                    wifi_log(buf);   // safe here: fpga_program()'s critical section already exited
                 }
             }
         }
@@ -244,12 +270,15 @@ static int menu_loadrom(const char *dir) {
             char buf[160];
             snprintf(buf, sizeof(buf), "menu_loadrom: calling load_rom fname=%s", fname.c_str());
             file_log(buf);
+            wifi_log(buf);
             overlay_status("Loading ROM: %s\n", fname.c_str());
             core->load_rom(fname.c_str());
             file_log("menu_loadrom: load_rom returned");
+            wifi_log("menu_loadrom: load_rom returned");
             return 1;
         } else {
             file_log("menu_loadrom: Core failed to load (active_core != core->id)");
+            wifi_log("menu_loadrom: Core failed to load (active_core != core->id)");
             overlay_status("Core failed to load\n");
             delay(1000);
             return -1;
@@ -360,6 +389,8 @@ static void uart1_rx_task(void *pvParameters)
     uint8_t pos = 0;
     uint8_t type = 0;
     uint16_t len = 0;
+    uint8_t dbg_trace_tag = 0;
+    uint8_t dbg_trace_buf[8] = {0};
     
     while (1) {
         if (bflb_uart_rxavailable(uart1_dev)) {
@@ -465,6 +496,35 @@ static void uart1_rx_task(void *pvParameters)
                     pos = 0;
                 } else
                     pos++;
+
+            } else if (type == 9) {              // RTL debug trace (see iosys_bl616.v)
+                // A general FPGA->MCU debug channel: the core sends a 1-byte tag plus
+                // 8 payload bytes, and they land as a line in debug.log on the SD card.
+                // This exists because there is no UART or JTAG into the running core --
+                // before it, the only way to see an internal RTL signal was to paint it
+                // on the HDMI output and read it off the screen by eye.
+                // NB: deliberately does NOT use `buffer` -- that is only 5 bytes, while
+                // this frame carries 9 payload bytes. Writing through it here overflowed
+                // the stack and crashed the MCU mid-log.
+                if (pos == 4) {
+                    dbg_trace_tag = ch;
+                    pos++;
+                } else if (pos < 4 + 1 + 8) {
+                    dbg_trace_buf[pos - 5] = ch;
+                    pos++;
+                    if (pos == 4 + 1 + 8) {
+                        char b[128];
+                        snprintf(b, sizeof(b),
+                            "RTL[%02x] %02x %02x %02x %02x %02x %02x %02x %02x",
+                            dbg_trace_tag,
+                            dbg_trace_buf[0], dbg_trace_buf[1], dbg_trace_buf[2], dbg_trace_buf[3],
+                            dbg_trace_buf[4], dbg_trace_buf[5], dbg_trace_buf[6], dbg_trace_buf[7]);
+                        file_log(b);
+                        pos = 0;
+                    }
+                } else {
+                    pos = 0;
+                }
 
             } else {
                 pos = 0; // Reset if we get out of sync
@@ -697,7 +757,8 @@ int main(void)
     // Create the tasks
     xTaskCreate(main_task, "main_task", MAIN_TASK_STACK_SIZE, NULL, MAIN_TASK_PRIORITY, &main_task_handle);
     xTaskCreate(uart1_rx_task, "uart1_rx_task", UART1_RX_TASK_STACK_SIZE, NULL, UART1_RX_TASK_PRIORITY, &uart1_rx_task_handle);
-    
+    wifi_debug_start();     // real no-op unless built with WIFI_DEBUG=1
+
     vTaskStartScheduler();
 
     while (1) {

@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string>
 
-#include "utils.h"
+#include "tc_utils.h"
 #include "cores.h"
 #include "overlay.h"
 #include "pcecd.h"

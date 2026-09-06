@@ -1,0 +1,9 @@
+#pragma once
+
+// Copy this file to wifi_creds.h (gitignored, never committed) and fill in real
+// values. Only used when built with WIFI_DEBUG=1 -- see utils/wifi_debug.cpp.
+
+#define WIFI_DEBUG_SSID       "your-ssid"
+#define WIFI_DEBUG_PASSWORD   "your-password"
+#define WIFI_DEBUG_LOG_HOST   "192.168.1.100"   // dev PC's IP on the same LAN
+#define WIFI_DEBUG_LOG_PORT   9999

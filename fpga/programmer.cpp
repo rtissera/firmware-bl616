@@ -14,7 +14,7 @@
 #include "programmer.h"
 #include <FreeRTOS.h>
 #include "task.h"
-#include "utils.h"
+#include "tc_utils.h"
 #include "overlay.h"
 
 extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp

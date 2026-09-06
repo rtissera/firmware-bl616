@@ -6,7 +6,7 @@ extern "C" {
 #include <FreeRTOS.h>
 #include <task.h>
 }
-#include "utils.h"
+#include "tc_utils.h"
 #include "overlay.h"
 
 /////////////////////////////////////////////////////////////////////////////////

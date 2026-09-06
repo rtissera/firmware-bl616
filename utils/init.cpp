@@ -3,7 +3,7 @@ extern "C" {
 #include "board.h"
 }
 
-#include "utils.h"
+#include "tc_utils.h"
 #include "init.h"
 
 extern "C" void bflb_uart_set_console(struct bflb_device_s *dev);
@@ -30,8 +30,17 @@ void init_gpio_and_uart() {
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_17);
 
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_20);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_21);
-    bflb_gpio_deinit(gpio_dev, GPIO_PIN_22);
+    // GPIO21/22 (UART0 TX/RX) deliberately NOT deinited (2026-09-06): board_init()
+    // already brings UART0 up on these pins at 2Mbaud. Tearing them down here is what
+    // made that UART silent. Keeping UART0 alive gives a live log channel to a PC that
+    // is completely separate from UART1 (the FPGA link), so it cannot corrupt the
+    // MCU<->core protocol the way logging over UART1 would. See dbg_uart_puts() in
+    // main.cpp. NOT YET CONFIRMED to actually reach a PC port on Console 60K -- the
+    // board hangs at the TangCore splash whenever it is cabled to a PC (a real,
+    // pre-existing behaviour, unrelated to this change), so it never reaches the menu
+    // code that would log anything while a capture is running.
+    // bflb_gpio_deinit(gpio_dev, GPIO_PIN_21);
+    // bflb_gpio_deinit(gpio_dev, GPIO_PIN_22);
 
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_27);
     bflb_gpio_deinit(gpio_dev, GPIO_PIN_28);

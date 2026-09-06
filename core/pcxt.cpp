@@ -2,7 +2,7 @@
 #include <string.h>      // for strcasestr
 
 #include "menu_manager.h"
-#include "utils.h"
+#include "tc_utils.h"
 #include "cores.h"
 #include "overlay.h"
 #include "file_chooser.h"

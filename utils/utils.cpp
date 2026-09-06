@@ -1,4 +1,4 @@
-#include "utils.h"
+#include "tc_utils.h"
 
 void fpga_tx_header(int cmd, int len) {
     bflb_uart_putchar(uart1_dev, 0xAA);

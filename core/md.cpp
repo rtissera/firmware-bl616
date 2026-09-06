@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include <string.h>
 
-#include "utils.h"
+#include "tc_utils.h"
 #include "cores.h"
 #include "overlay.h"
 

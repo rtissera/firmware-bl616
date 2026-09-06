@@ -2,10 +2,11 @@
 #include <string.h>      // for strcasestr
 #include <stdio.h>
 
-#include "utils.h"
+#include "tc_utils.h"
 #include "cores.h"
 #include "overlay.h"
 #include "pcecd.h"
+#include "wifi_debug.h"
 
 extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
 
@@ -20,12 +21,14 @@ int loadpce(const char *fname) {
         char buf[128];
         snprintf(buf, sizeof(buf), "loadpce: start fname=%s", fname);
         file_log(buf);
+        wifi_log(buf);
     }
 
     // check extension .pce
     char *p = strcasestr(fname, ".pce");
     if (p == NULL) {
         file_log("loadpce: not a .pce, abort");
+        wifi_log("loadpce: not a .pce, abort");
         overlay_message("Only .pce supported", 1);
         goto loadpce_end;
     }
@@ -35,6 +38,7 @@ int loadpce(const char *fname) {
         char buf[64];
         snprintf(buf, sizeof(buf), "loadpce: f_open returned %d", r);
         file_log(buf);
+        wifi_log(buf);
     }
     if (r) {
         overlay_status("Cannot open file");
@@ -45,6 +49,7 @@ int loadpce(const char *fname) {
         char buf[64];
         snprintf(buf, sizeof(buf), "loadpce: size=%u", size);
         file_log(buf);
+        wifi_log(buf);
     }
 
     // Some .pce dumps carry a 512-byte copier header ahead of the real HuCard
@@ -67,6 +72,7 @@ int loadpce(const char *fname) {
     // Send rom content
     if ((r = f_lseek(&fcore, off)) != FR_OK) {
         file_log("loadpce: seek failure");
+        wifi_log("loadpce: seek failure");
         overlay_status("Seek failure");
         goto loadpce_pce_end;
     }
@@ -89,12 +95,14 @@ int loadpce(const char *fname) {
         char buf[64];
         snprintf(buf, sizeof(buf), "loadpce: sent total=%u bytes, r=%d", total, r);
         file_log(buf);
+        wifi_log(buf);
     }
     overlay_status("Success");
     core_running = true;
 
     overlay(0);		// turn off OSD
     file_log("loadpce: overlay off, core_running=true, success");
+    wifi_log("loadpce: overlay off, core_running=true, success");
 
 loadpce_pce_end:
     set_loading_state(0);   // turn off game loading, this starts the core
@@ -104,6 +112,7 @@ loadpce_end:
         char buf[64];
         snprintf(buf, sizeof(buf), "loadpce: returning %d", r);
         file_log(buf);
+        wifi_log(buf);
     }
     return r;
 }
@@ -112,14 +121,35 @@ loadpce_end:
 // extension is the real discriminator between a HuCard dump (.pce) and a CD image
 // (.chd), checked here before either loader's own file-open path runs.
 int loadpce_dispatch(const char *fname) {
-    if (strcasestr(fname, ".chd") != NULL)
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "loadpce_dispatch: fname=%s", fname);
+        file_log(buf);
+        wifi_log(buf);
+    }
+    if (strcasestr(fname, ".chd") != NULL) {
+        file_log("loadpce_dispatch: .chd -> loadpcecd");
+        wifi_log("loadpce_dispatch: .chd -> loadpcecd");
         return loadpcecd(fname);
+    }
+    file_log("loadpce_dispatch: not .chd -> loadpce path");
+    wifi_log("loadpce_dispatch: not .chd -> loadpce path");
     // Drop any disc left mounted from a prior .chd load -- but only if something
     // actually is mounted. pcecd_unload() always sends a mount(0) frame to the FPGA,
     // which is fine once the CD core is already listening (its 3 existing callers)
     // but not right after a fresh fpga_program(), before loadpce() below has even
     // reached set_loading_state(1).
-    if (pcecd_is_mounted())
+    if (pcecd_is_mounted()) {
+        file_log("loadpce_dispatch: disc was mounted, unloading first");
+        wifi_log("loadpce_dispatch: disc was mounted, unloading first");
         pcecd_unload();
-    return loadpce(fname);
+    }
+    int r = loadpce(fname);
+    {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "loadpce_dispatch: loadpce returned %d", r);
+        file_log(buf);
+        wifi_log(buf);
+    }
+    return r;
 }

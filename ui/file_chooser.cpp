@@ -7,7 +7,7 @@ extern "C" {
 
 #include "file_chooser.h"
 #include "overlay.h"
-#include "utils.h"
+#include "tc_utils.h"
 
 #define PAGESIZE 22
 #define TOPLINE 2

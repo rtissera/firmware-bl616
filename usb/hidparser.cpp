@@ -11,7 +11,7 @@
 
 #include "hidparser.h"
 #include "usb2ps2.h"
-#include "utils.h"
+#include "tc_utils.h"
 #include "overlay.h"
 
 #define hidp_debugf(fmt, ...) do {} while(0)
