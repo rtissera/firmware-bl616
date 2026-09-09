@@ -2,6 +2,9 @@ SDK_DEMO_PATH ?= .
 BL_SDK_BASE ?= ../bouffalo_sdk
 TANG_BOARD ?= console60k
 WIFI_DEBUG ?= 0
+# USB CDC debug channel (see usb/cdc_debug.c). Swaps the USB host stack for the device
+# stack, so this build has NO gamepad support. Dev only, never shipped.
+USB_CDC_DEBUG ?= 0
 
 export BL_SDK_BASE
 
@@ -11,6 +14,7 @@ CROSS_COMPILE ?= riscv64-unknown-elf-
 
 cmake_definition+=-DTANG_BOARD=$(TANG_BOARD)
 cmake_definition+=-DWIFI_DEBUG=$(WIFI_DEBUG)
+cmake_definition+=-DUSB_CDC_DEBUG=$(USB_CDC_DEBUG)
 
 include $(BL_SDK_BASE)/project.build
 

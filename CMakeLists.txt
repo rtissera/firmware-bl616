@@ -6,10 +6,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CONFIG_FREERTOS 1)
 set(CONFIG_CHERRYUSB 1)
-set(CONFIG_CHERRYUSB_HOST 1)
+# BL616 has ONE USB controller, so host and device are mutually exclusive. The shipped
+# build is HOST (gamepads, USB drives); USB_CDC_DEBUG swaps it for DEVICE to get a live
+# CDC link to a PC. See usb/cdc_debug.c.
+if(USB_CDC_DEBUG)
+    set(CONFIG_CHERRYUSB_DEVICE 1)
+    set(CONFIG_CHERRYUSB_DEVICE_CDC 1)
+    add_definitions(-DTANGCORE_USB_CDC_DEBUG=1)
+else()
+    set(CONFIG_CHERRYUSB_HOST 1)
+endif()
 set(CONFIG_BSP_SDH_SDCARD 1)
 set(CONFIG_FATFS 1)
-set(CONFIG_FATFS_USBH 1)
+# FatFs-over-USB-host only makes sense with the host stack.
+if(NOT USB_CDC_DEBUG)
+    set(CONFIG_FATFS_USBH 1)
+endif()
 set(CONFIG_FATFS_SDH_SDCARD 1)
 
 # Dev-only WiFi UDP debug logging (real hardware iteration without SD-card swaps).
@@ -102,6 +114,14 @@ file(GLOB_RECURSE MY_SOURCES
     "core/*.cpp"
     "utils/*.cpp"
 )
+
+if(USB_CDC_DEBUG)
+    # usb_gamepad.cpp is pure USB-host code and will not link without the host stack.
+    # No stub is needed for it: its only caller in main.cpp is inside the #else branch,
+    # and hid1_state/hid2_state live in utils/utils.cpp, not in the driver.
+    list(REMOVE_ITEM MY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/usb/usb_gamepad.cpp")
+    list(APPEND MY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/usb/cdc_debug.c")
+endif()
 
 file(GLOB LIBCHDR_SOURCES
     "chd/*.c"

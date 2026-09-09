@@ -20,7 +20,11 @@ extern "C" {
 #include "bflb_clock.h"
 #include "bl616_clock.h"
 
+#ifdef TANGCORE_USB_CDC_DEBUG
+#include "cdc_debug.h"
+#else
 #include "usbh_core.h"
+#endif
 #include "ff.h"
 #include "fatfs_diskio_register.h"
 }
@@ -56,7 +60,9 @@ struct bflb_device_s *uart0_dev;
 struct bflb_device_s *uart1_dev;
 
 // USB and fatfs
+#ifndef TANGCORE_USB_CDC_DEBUG
 struct usbh_msc *msc;
+#endif
 const char *drv = "sd:";
 
 // Tasks and shared state
@@ -556,6 +562,11 @@ static void main_task(void *pvParameters)
         overlay_status("SD card mounted in %d ms", bflb_mtimer_get_time_ms() - start);
         uart_dbg("BOOT: sd: mounted");
     } else  {
+#ifdef TANGCORE_USB_CDC_DEBUG
+        // No USB host in this build, so there is no usb: drive to fall back to.
+        overlay_status("SD not found (no usb: fallback in CDC debug build)");
+        uart_dbg("BOOT: sd: not found, no usb: fallback (USB_CDC_DEBUG build)");
+#else
         overlay_status("SD not found. Mounting USB...");
         uart_dbg("BOOT: sd: not found, mounting usb:");
         drv = "usb:";
@@ -569,6 +580,7 @@ static void main_task(void *pvParameters)
             overlay_status("USB drive mounted in %d ms", bflb_mtimer_get_time_ms() - start);
             uart_dbg("BOOT: usb: mounted");
         }
+#endif
     }
 
     // load monitor core at startup
@@ -591,6 +603,9 @@ static void main_task(void *pvParameters)
         bool redraw = true;
         int choice = 0;
         for (;;) {
+#ifdef TANGCORE_USB_CDC_DEBUG
+            cdc_debug_poll();   // service one pending PC command per iteration
+#endif
             uint32_t now = bflb_mtimer_get_time_ms();
             if (active_core == -1) {
                 // send_blank_packet();
@@ -747,11 +762,21 @@ int main(void)
     fatfs_sdh_driver_register();        // calls SDH_Init()
     // f_mount(&fs_sd, "sd:", 0);          // registers SDMMC drive 
 
+#ifdef TANGCORE_USB_CDC_DEBUG
+    // USB DEVICE mode instead of host: brings up a CDC-ACM link to a PC on the same
+    // connector. No gamepads and no USB mass-storage drive in this build -- see
+    // usb/cdc_debug.c. This is also the boot step at which the board is observed to hang
+    // when cabled to a PC in a normal (host) build, which is the leading explanation for
+    // that hang: two hosts on one cable.
+    overlay_status("Initializing USB CDC debug...");
+    cdc_debug_init();
+#else
     // Initializing USB host...
     overlay_status("Initializing USB host...");
     usbh_initialize();
     fatfs_usbh_driver_register();
     usb_gamepad_init();
+#endif
 
     overlay_status("Creating tasks...");
     // Create the tasks
