@@ -379,7 +379,19 @@ typedef chd_error (*chd_codec_interface_decompress)(void *codec, const uint8_t *
 /* same as chd_create(), but accepts an already-opened core_file object */
 /* chd_error chd_create_file(core_file *file, uint64_t logicalbytes, uint32_t hunkbytes, uint32_t compression, chd_file *parent); */
 
-/* open an existing CHD file */
+/* open an existing CHD file
+ *
+ * The file handle and the parent are handed over to libchdr by the call,
+ * whether it succeeds or not. On success, chd_close() closes both; on
+ * failure, they have already been closed - through the fclose callback, or
+ * chd_close() for the parent - and must not be closed again. To retry a child
+ * that reported CHDERR_REQUIRES_PARENT, open its file again. The one exception
+ * is chd_open_core_file_callbacks() with NULL callbacks, which has nothing to
+ * close the file with and leaves it to the caller.
+ *
+ * chd_open_file() never closes the FILE it is given, on success or failure:
+ * its fclose callback does nothing. It does take the parent, like the others.
+ * chd_open() closes the file it opened. */
 CHD_EXPORT chd_error chd_open_core_file_callbacks(const core_file_callbacks *callbacks, const void *user_data, int mode, chd_file *parent, chd_file **chd);
 CHD_EXPORT chd_error chd_open_core_file(core_file *file, int mode, chd_file *parent, chd_file **chd); /* Legacy; use chd_open_core_file_callbacks instead! */
 CHD_EXPORT chd_error chd_open_file(FILE *file, int mode, chd_file *parent, chd_file **chd);
@@ -387,6 +399,41 @@ CHD_EXPORT chd_error chd_open(const char *filename, int mode, chd_file *parent, 
 
 /* precache underlying file */
 CHD_EXPORT chd_error chd_precache(chd_file *chd);
+
+/* Give libchdr a memory budget, in bytes, to spend on internal caching.
+ *
+ * 0 (the default) disables it entirely and reproduces the historical
+ * behaviour exactly. libchdr deliberately does not choose this number
+ * itself: how much memory is available is a property of the embedding
+ * system, anywhere from a desktop to a microcontroller with a few hundred
+ * KB of SRAM, and not something a library can portably discover.
+ *
+ * Currently spent on a compressed read-ahead window, which collapses the
+ * one-seek-plus-one-read-per-hunk access pattern into far fewer, larger
+ * transfers. That matters when the per-transaction cost of the storage
+ * stack dominates its per-byte cost, which is the usual case for SD/eMMC
+ * behind a filesystem. Sequential reads transfer each byte exactly once
+ * regardless of the budget, so a larger budget trades memory for fewer
+ * transactions and never for redundant I/O.
+ *
+ * May be called at any time on an open file; lowering or zeroing it frees
+ * immediately. Returns CHDERR_OUT_OF_MEMORY if the budget could not be
+ * allocated, in which case caching stays off and the file remains fully
+ * usable.
+ *
+ * The value is a ceiling: libchdr never allocates more than this. A window
+ * smaller than one hunk cannot serve a read, so a budget below hunkbytes
+ * leaves caching off rather than exceeding the budget - hunkbytes ranges from
+ * 19,584 bytes on a CD image to 223,668 on AVHuff, so rounding up would
+ * allocate more than ten times the stated budget on some files. Call
+ * chd_get_cache_budget() to see what was actually taken; it returns 0 when
+ * caching is off. */
+CHD_EXPORT chd_error chd_set_cache_budget(chd_file *chd, size_t bytes);
+CHD_EXPORT size_t chd_get_cache_budget(const chd_file *chd);
+
+/* Read-ahead window hit/miss counts since the budget was last set. For
+ * tuning and diagnostics; either pointer may be NULL. */
+CHD_EXPORT void chd_get_cache_stats(const chd_file *chd, uint64_t *hits, uint64_t *misses);
 
 /* close a CHD file */
 CHD_EXPORT void chd_close(chd_file *chd);
@@ -414,7 +461,27 @@ CHD_EXPORT chd_error chd_read_header(const char *filename, chd_header *header);
 
 /* ----- core data read/write ----- */
 
-/* read one hunk from the CHD file */
+/* Read one hunk from the CHD file.
+ *
+ * `buffer` must be ordinary readable RAM, not just writable: several codecs
+ * work through it rather than only filling it at the end. LZMA uses it as its
+ * dictionary window, so every back-reference reads bytes it wrote earlier in
+ * the same call; and with CHDR_CD_SCRATCH_BUFFER=0 a CD hunk is decoded into
+ * it packed and then spread out to the frame stride in place. An uncached or
+ * write-combining region, a write-only mapping or a hardware FIFO still
+ * yields correct output but can be far slower, and a consumer streaming
+ * `buffer` out while the call is in progress would see intermediate data
+ * rather than the finished hunk.
+ *
+ * `buffer` must also be at least 2-byte aligned: the FLAC codecs write 16-bit
+ * samples into it directly. Anything from malloc or an array already is. In
+ * the CD case an odd pointer is refused with CHDERR_INVALID_PARAMETER rather
+ * than trapping on a target without unaligned stores.
+ *
+ * CHDR_CD_SCRATCH_BUFFER=1 keeps a hunk-sized scratch per CD codec and writes
+ * `buffer` once at the end, which lifts the read-back requirement for CD
+ * images at the cost of roughly 37 KB of heap per open image. It does not
+ * change the LZMA or FLAC cases above, which apply to every build. */
 CHD_EXPORT chd_error chd_read(chd_file *chd, uint32_t hunknum, void *buffer);
 
 

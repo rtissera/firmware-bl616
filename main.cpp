@@ -383,9 +383,29 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
     return 0;
 }
 
-#define MAIN_TASK_STACK_SIZE  2048
+/* 2026-09-10: was 2048 words (8KB). A CD load hangs inside FatFs f_open, and the SD
+ * card is exFAT: FF_USE_LFN 2 puts the LFN working buffer on the STACK, costing
+ * (FF_MAX_LFN+1)*2 + (FF_MAX_LFN+44)/15*32 = 1120 bytes per call with exFAT enabled,
+ * and f_open is reached eight frames deep through C++ code holding std::string.
+ * FreeRTOS's stack-overflow hook is `printf(); while(1);` on UART0, which nobody is
+ * capturing -- so an overflow looks exactly like the observed silent hang. 32KB costs
+ * 24KB of a 447KB region that is 12.77% used. The high-water mark is logged next to
+ * the CD open so this stops being a guess. */
+#define MAIN_TASK_STACK_SIZE  8192
 #define MAIN_TASK_PRIORITY    3
-#define UART1_RX_TASK_STACK_SIZE  512
+/* 2026-09-11: was 512 words (2KB), and the SD-logged stack-overflow hook caught it:
+ * "FATAL: stack overflow in task 'uart1_rx_task'" right after DECODE-START. The CD
+ * sector request arrives as UART opcode 6, so pcecd_serve_sector() -- and with it the
+ * whole chd_read() decode, LZMA/zlib/FLAC included -- runs ON THIS TASK'S STACK. miniz's
+ * tinfl_decompress_mem_to_* frames alone measure ~8.4KB on rv32imafc -O2, so 2KB never
+ * had a chance; the decode simply ran off the end and the SDK's own hook (printf on an
+ * uncaptured UART0, then while(1)) made it look like chd_read was hanging.
+ *
+ * NOTE this is the task that actually needed the space -- MAIN_TASK_STACK_SIZE was raised
+ * to 8192 earlier while chasing the same symptom and measured 29736 bytes still free,
+ * because the decode was never on main_task at all. See the high-water marks logged next
+ * to SERVED: to right-size BOTH of these afterwards. */
+#define UART1_RX_TASK_STACK_SIZE  8192
 #define UART1_RX_TASK_PRIORITY    3
 
 // Receive joypad updates and other UART responses from the FPGA

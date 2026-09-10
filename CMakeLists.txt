@@ -87,6 +87,14 @@ add_definitions(
     -DMINIZ_NO_DEFLATE_APIS
     -DMINIZ_NO_STDIO
     -DMINIZ_NO_TIME
+    # FLAC backend: micro-flac instead of dr_flac, per libchdr's own
+    # contrib/tangcore-bl616 reference integration. Byte-identical output; faster and
+    # lower peak heap on every board it has been measured on (ESP32-S3 1.198x on a
+    # CD-FLAC hunk, RP2350 1.032x overall). NOT measured on BL616 -- taken on the
+    # strength of the other two, and reversible by dropping these two defines and
+    # putting libchdr_flac.c back in the glob below.
+    -DCHDR_FLAC_BACKEND_MICROFLAC
+    -DMICRO_FLAC_DISABLE_OGG
 )
 
 find_package(bouffalo_sdk REQUIRED HINTS $ENV{BL_SDK_BASE})
@@ -96,6 +104,7 @@ sdk_add_include_directories(
     . usb fpga ui core utils chd
     thirdparty/libchdr/include
     thirdparty/libchdr/src
+    thirdparty/micro-flac/include
 )
 
 if(WIFI_DEBUG)
@@ -131,7 +140,22 @@ file(GLOB LIBCHDR_SOURCES
     "thirdparty/libchdr/deps/zstd-1.5.7/zstddeclib.c"
 )
 
-target_sources(app PRIVATE ${MY_SOURCES} ${LIBCHDR_SOURCES})
+# Exactly ONE FLAC backend is compiled. libchdr_flac.c is the dr_flac one, so it has to
+# leave the glob when micro-flac comes in, or both define the same symbols.
+list(REMOVE_ITEM LIBCHDR_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libchdr/src/libchdr_flac.c")
+
+set(LIBCHDR_MICROFLAC_SOURCES
+    "thirdparty/libchdr/src/libchdr_flac_microflac.cpp"
+    "thirdparty/micro-flac/src/flac_decoder.cpp"
+    "thirdparty/micro-flac/src/decorrelation.cpp"
+    "thirdparty/micro-flac/src/frame_header.cpp"
+    "thirdparty/micro-flac/src/pcm_packing.cpp"
+    "thirdparty/micro-flac/src/crc.cpp"
+    "thirdparty/micro-flac/src/lpc.cpp"
+)
+
+target_sources(app PRIVATE ${MY_SOURCES} ${LIBCHDR_SOURCES} ${LIBCHDR_MICROFLAC_SOURCES})
 sdk_set_main_file(main.cpp)
 
 project(tangcore CXX)
