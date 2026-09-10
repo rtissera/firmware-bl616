@@ -1,0 +1,7 @@
+# micro-flac is the FLAC backend libchdr's contrib/tangcore-bl616 integration selects for
+# MCU targets (-DCHDR_FLAC_BACKEND_MICROFLAC). Fetched, never vendored: it is Apache-2.0
+# and libchdr stays BSD-3 for its other consumers. Pinned, because the backend compiles
+# against micro-flac's internals.
+[submodule "thirdparty/micro-flac"]
+	path = thirdparty/micro-flac
+	url = https://github.com/esphome-libs/micro-flac.git
