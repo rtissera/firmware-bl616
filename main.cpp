@@ -69,6 +69,32 @@ const char *drv = "sd:";
 TaskHandle_t main_task_handle;
 TaskHandle_t uart1_rx_task_handle;
 
+/* CD sector requests are handed to a worker task instead of being served inline.
+ *
+ * uart1_rx_task is the ONLY consumer of the UART1 RX FIFO and it polls
+ * (bflb_uart_rxavailable). Serving a sector inline blocks that poll for tens of
+ * milliseconds -- a libchdr hunk decode plus a 2048-byte TX -- during which anything the
+ * FPGA sends queues into a 32-byte hardware FIFO and, once that is full, is LOST.
+ *
+ * Measured on hardware 2026-09-11. The FPGA asked for LBA 3591 (bytes 00 00 0E 07); the
+ * MCU logged a request for 43520 = 0x00AA00, i.e. bytes 00 00 AA 00 -- the frame arrived
+ * two bytes short and the parser back-filled from the NEXT frame's header (0xAA) and
+ * length byte. 43520 is inside the disc, so the MCU then served a perfectly valid sector
+ * from completely the wrong place and the syscard got garbage where the IPL belonged:
+ * LOAD ERROR on Dungeon Explorer II and Bonk III, and a retry storm on the games whose
+ * boot read is 16+ sectors (Prince of Persia, Double Dragon II).
+ *
+ * With this queue the RX task parses a frame, posts it, and goes straight back to
+ * polling, so the FIFO is drained continuously and no frame is ever truncated. */
+struct cd_req_t {
+    uint32_t lba;
+    bool     is_audio;
+};
+static QueueHandle_t cd_req_queue;
+// Highest UART1 RX FIFO occupancy ever seen, reported in pcecd's cdprog line.
+volatile uint16_t uart1_rx_hiwater = 0;
+TaskHandle_t cd_serve_task_handle;
+
 #ifdef TANG_CONSOLE60K
 const char *BOARD_NAME = "console60k";
 #elif defined(TANG_CONSOLE138K)
@@ -408,6 +434,23 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
 #define UART1_RX_TASK_STACK_SIZE  8192
 #define UART1_RX_TASK_PRIORITY    3
 
+// Serves CD sector requests off the RX path. Priority is BELOW uart1_rx_task so that
+// draining the UART always wins over decoding a hunk -- the whole point of the split.
+#define CD_SERVE_TASK_STACK_SIZE  8192   // libchdr decode runs here now, not on the RX task
+#define CD_SERVE_TASK_PRIORITY    2
+static void cd_serve_task(void *pvParameters)
+{
+    cd_req_t req;
+    for (;;) {
+        if (xQueueReceive(cd_req_queue, &req, portMAX_DELAY) == pdTRUE) {
+            if (req.is_audio)
+                pcecd_serve_audio_sector(req.lba);
+            else
+                pcecd_serve_sector(req.lba);
+        }
+    }
+}
+
 // Receive joypad updates and other UART responses from the FPGA
 static void uart1_rx_task(void *pvParameters)
 {
@@ -417,9 +460,17 @@ static void uart1_rx_task(void *pvParameters)
     uint16_t len = 0;
     uint8_t dbg_trace_tag = 0;
     uint8_t dbg_trace_buf[8] = {0};
-    
+
     while (1) {
         if (bflb_uart_rxavailable(uart1_dev)) {
+            /* Direct measurement of the overflow hypothesis, instead of inferring it
+             * from corrupted LBAs. If this high-water mark reaches the hardware FIFO
+             * depth, bytes were being dropped and frames arrive truncated; if it stays
+             * well under, RX loss is NOT the remaining problem and the fault is
+             * elsewhere. Cheap: one register read per byte, no allocation, no logging. */
+            int rxcnt = bflb_uart_feature_control(uart1_dev, UART_CMD_GET_RX_FIFO_CNT, 0);
+            if (rxcnt > (int)uart1_rx_hiwater)
+                uart1_rx_hiwater = (uint16_t)rxcnt;
             uint8_t ch = bflb_uart_getchar(uart1_dev);
             
             if (pos == 0) {          // expecting 0xAA
@@ -515,10 +566,13 @@ static void uart1_rx_task(void *pvParameters)
                     bool is_audio = (buffer[0] & 0x01) != 0;
                     uint32_t lba = ((uint32_t)buffer[1] << 16) | ((uint32_t)buffer[2] << 8)
                                   | buffer[3];
-                    if (is_audio)
-                        pcecd_serve_audio_sector(lba);
-                    else
-                        pcecd_serve_sector(lba);
+                    // Post, never serve inline -- see cd_req_queue's comment above.
+                    // Non-blocking on purpose: if the queue were ever full, dropping the
+                    // request is still better than stalling the RX poll, which is the
+                    // very failure this exists to prevent.
+                    cd_req_t req = { lba, is_audio };
+                    if (cd_req_queue)
+                        xQueueSend(cd_req_queue, &req, 0);
                     pos = 0;
                 } else
                     pos++;
@@ -802,6 +856,8 @@ int main(void)
     // Create the tasks
     xTaskCreate(main_task, "main_task", MAIN_TASK_STACK_SIZE, NULL, MAIN_TASK_PRIORITY, &main_task_handle);
     xTaskCreate(uart1_rx_task, "uart1_rx_task", UART1_RX_TASK_STACK_SIZE, NULL, UART1_RX_TASK_PRIORITY, &uart1_rx_task_handle);
+    cd_req_queue = xQueueCreate(16, sizeof(cd_req_t));
+    xTaskCreate(cd_serve_task, "cd_serve_task", CD_SERVE_TASK_STACK_SIZE, NULL, CD_SERVE_TASK_PRIORITY, &cd_serve_task_handle);
     wifi_debug_start();     // real no-op unless built with WIFI_DEBUG=1
 
     vTaskStartScheduler();

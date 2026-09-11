@@ -44,6 +44,26 @@ extern "C" unsigned chd_dbg_stack_free_bytes(void) {
     return (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t));
 }
 
+// Non-allocating heap snapshot, for the leak/fragmentation hypothesis. Uses the SDK's
+// own pfree_size(): the newlib port routes _malloc_r to bflb_malloc(PMEM_HEAP, ...),
+// so PMEM is exactly the heap libchdr allocates from. NOT mallinfo() -- pulling
+// <malloc.h> drags newlib's own allocator into the link and collides with the SDK's
+// port_memory.c ("multiple definition of _malloc_r"). And NOT
+// chd_dbg_largest_free_block() below, which allocates and has broken three separate
+// hardware runs.
+//
+// Why this matters: libchdr calls plain malloc(), and the SDK's malloc failing returns
+// NULL without ever reaching vApplicationMallocFailedHook -- it surfaces as a silent
+// CHDERR_OUT_OF_MEMORY out of chd_read(). Heap exhaustion therefore looks exactly like
+// the observed behaviour: serves a few sectors, then stops, with no FATAL line.
+extern "C" {
+#include "mem.h"
+}
+static void pcecd_heap_str(char *out, size_t n) {
+    snprintf(out, n, "pfree=%u kfree=%u",
+             (unsigned)pfree_size(), (unsigned)kfree_size());
+}
+
 extern "C" size_t chd_dbg_largest_free_block(void) {
     // Bounded and coarse on purpose. The first version walked 512KB down in 1KB steps,
     // i.e. up to 512 failing mallocs, each of which can drive newlib into _sbrk; that
@@ -202,26 +222,70 @@ static uint32_t pcecd_next_report = 1;
 // that was served fine, and the first real sector request stalled with no explanation.
 // These now reach the SD log. They are one-shot (a stalled boot repeats nothing), so they
 // cannot flood the UART RX path the way a per-sector log would.
+// 2026-09-11: SERVE-PATH SD LOGGING OFF BY DEFAULT, and this is a real fix, not tidying.
+// file_log() does f_write + f_sync to the SD card, and pcecd_serve_sector() runs INSIDE
+// uart1_rx_task -- the sector request arrives as UART opcode 6. So every line logged from
+// this path blocks the MCU's UART RX for milliseconds. cd_bridge fires SECTOR_REQ for the
+// next sector the moment it has consumed 2048 bytes, which lands squarely in that window,
+// and the request frame is dropped.
+//
+// Measured on hardware, trace tag 0xAF: SECTOR_DATA_VALID=2048, SECTOR_REQ=2 on the FPGA
+// side, while the MCU's own counter reported reqs=1. The bridge asked twice; the MCU never
+// heard the second. MCU TX is unaffected (all 2048 bytes reached the FPGA), only RX.
+//
+// Set to 1 only for a one-off diagnosis, and expect it to break multi-sector transfers
+// while it is on. The FPGA-side 0xAE/0xAF counters are the safe way to watch this path:
+// they accumulate in RTL and cost one frame per heartbeat regardless of activity.
+// 2026-09-11: BACK ON, deliberately. The earlier reason for switching this off was
+// that trace frames were thought to be starving the sector-request path -- that was
+// tested and DISPROVEN: with the FPGA trace channel compiled out entirely
+// (DBG_TRACE => 0), Prince of Persia behaves identically. Meanwhile the real failure
+// is terminal and silent: PoP served its 18 boot sectors correctly, then delivered
+// nothing across 146 retries of the same read, with no FATAL line -- so the MCU is
+// alive and taking one of pcecd_serve_sector()'s silent early returns. Every line
+// below is ONE-SHOT, so the whole diagnosis costs a handful of f_syncs, not a
+// per-sector flood.
+#define PCECD_TRACE_SERVE 1
+
+// Log EVERY served sector as "SEC lba=<n> d=<first 8 user bytes>", for a direct diff
+// against a golden trace from beetle-pce-fast (whose own PCESEC lines carry exactly the
+// same two fields). Spot-checking one sector proved the mapping and the FIFO fix, but it
+// cannot catch a divergence later in the stream -- this can.
+//
+// Only safe because sector serving now runs on cd_serve_task, NOT on uart1_rx_task:
+// file_log() f_syncs every line, and doing that on the RX path is what truncated the
+// request frames in the first place. It still costs an SD write per sector, so it
+// visibly slows serving and CHANGES TIMING -- treat it as a diagnostic build, not a
+// representative one, and turn it off before judging whether a game runs.
+#define PCECD_TRACE_SECTORS 1
+#define PCECD_TRACE_SECTORS_MAX 1500
+static uint32_t pcecd_sec_logged = 0;
+
 static uint8_t pcecd_fail_logged = 0;
 static uint8_t pcecd_served_logged = 0;
 static uint8_t pcecd_decode_logged = 0;
 static void pcecd_log_once(const char *msg) {
+    if (!PCECD_TRACE_SERVE) return;   // never block UART RX on the CD path
     if (pcecd_fail_logged) return;
     pcecd_fail_logged = 1;
     file_log(msg);
 }
 
+extern volatile uint16_t uart1_rx_hiwater;   // see main.cpp
 static void pcecd_progress_tick(void) {
     // Log on a 1,2,4,8,... schedule: dense at the start where "did anything happen at
     // all" is the question, then rare, so a working stream cannot flood the SD card
     // (file_log f_syncs every line).
+    if (!PCECD_TRACE_SERVE) return;   // never block UART RX on the CD path
     if (pcecd_req_count < pcecd_next_report)
         return;
     pcecd_next_report *= 2;
     char buf[112];
-    snprintf(buf, sizeof(buf), "cdprog: reqs=%lu hunk_reads=%lu last_lba=%lu tick=%lu",
+    snprintf(buf, sizeof(buf),
+             "cdprog: reqs=%lu hunk_reads=%lu last_lba=%lu rxhi=%u tick=%lu",
              (unsigned long)pcecd_req_count, (unsigned long)pcecd_hunk_reads,
-             (unsigned long)pcecd_last_lba, (unsigned long)xTaskGetTickCount());
+             (unsigned long)pcecd_last_lba, (unsigned)uart1_rx_hiwater,
+             (unsigned long)xTaskGetTickCount());
     file_log(buf);
 }
 
@@ -275,7 +339,7 @@ void pcecd_serve_sector(uint32_t lba) {
         // Announce the decode BEFORE running it. Without this, "returned early" and
         // "still inside chd_read" produce identical logs -- the same trap that made the
         // chd_open hang take three hardware rounds earlier today.
-        if (!pcecd_decode_logged) {
+        if (PCECD_TRACE_SERVE && !pcecd_decode_logged) {
             pcecd_decode_logged = 1;
             char b[136];
             // NO heap probe here. chd_dbg_largest_free_block() walks malloc down from
@@ -292,9 +356,11 @@ void pcecd_serve_sector(uint32_t lba) {
         }
         chd_error err = chd_read(pcecd_chd, hunknum, pcecd_hunk_buf);
         if (err != CHDERR_NONE) {
-            char b[96];
-            snprintf(b, sizeof(b), "SERVE-FAIL: chd_read(hunk %lu) = %d (%s)",
-                     (unsigned long)hunknum, (int)err, chd_error_string(err));
+            char b[176], h[96];
+            pcecd_heap_str(h, sizeof(h));
+            snprintf(b, sizeof(b), "SERVE-FAIL: chd_read(hunk %lu) = %d (%s) after %lu hunks | %s",
+                     (unsigned long)hunknum, (int)err, chd_error_string(err),
+                     (unsigned long)pcecd_hunk_reads, h);
             pcecd_log_once(b);
             return;
         }
@@ -304,6 +370,14 @@ void pcecd_serve_sector(uint32_t lba) {
 
     const uint8_t *raw = pcecd_hunk_buf + (uint32_t)sector_in_hunk * PCECD_RAW_UNIT_BYTES
                           + PCECD_USER_DATA_OFFSET;
+    if (PCECD_TRACE_SECTORS && pcecd_sec_logged < PCECD_TRACE_SECTORS_MAX) {
+        pcecd_sec_logged++;
+        char b[80];
+        snprintf(b, sizeof(b), "SEC lba=%lu d=%02x%02x%02x%02x%02x%02x%02x%02x",
+                 (unsigned long)lba, raw[0], raw[1], raw[2], raw[3],
+                 raw[4], raw[5], raw[6], raw[7]);
+        file_log(b);
+    }
     pcecd_send_sector_chunk(0, raw, 1024);
     pcecd_send_sector_chunk(1, raw + 1024, 1024);
 
@@ -311,7 +385,7 @@ void pcecd_serve_sector(uint32_t lba) {
     // produced it -- lba, the file frame it resolved to, the hunk, and the first bytes of
     // user data. For LBA 3590 on this disc the mapping should give file frame 3368, and a
     // Mode-1 data sector's user area starts with the disc's own content, not zeros.
-    if (!pcecd_served_logged) {
+    if (PCECD_TRACE_SERVE && !pcecd_served_logged) {
         pcecd_served_logged = 1;
         char b[160];
         snprintf(b, sizeof(b),
@@ -319,6 +393,10 @@ void pcecd_serve_sector(uint32_t lba) {
                  (unsigned long)lba, (unsigned long)fframe, (unsigned long)hunknum,
                  (unsigned long)sector_in_hunk, raw[0], raw[1], raw[2], raw[3],
                  (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+        file_log(b);
+        char h[96];
+        pcecd_heap_str(h, sizeof(h));
+        snprintf(b, sizeof(b), "SERVED-HEAP: %s", h);
         file_log(b);
     }
 }
@@ -356,7 +434,7 @@ void pcecd_serve_audio_sector(uint32_t lba) {
         // Announce the decode BEFORE running it. Without this, "returned early" and
         // "still inside chd_read" produce identical logs -- the same trap that made the
         // chd_open hang take three hardware rounds earlier today.
-        if (!pcecd_decode_logged) {
+        if (PCECD_TRACE_SERVE && !pcecd_decode_logged) {
             pcecd_decode_logged = 1;
             char b[136];
             // NO heap probe here. chd_dbg_largest_free_block() walks malloc down from
