@@ -542,6 +542,83 @@ static void cd_serve_task(void *pvParameters)
     }
 }
 
+// ---------------------------------------------------------------------------
+// INTERRUPT-DRIVEN UART1 RX (2026-09-16).
+//
+// uart1_rx_task used to poll bflb_uart_getchar() directly, so the 32-byte hardware FIFO
+// was only drained while that task was scheduled. That has always been the fragile part
+// of this link -- rxhi peaked at 24 of 32 even before any of the CD work, i.e. 75% full
+// with no margin -- and it is how sector-request frames get truncated when the CPU is
+// busy (see ef4ffd7: serving inline on this task produced LBA 3591 arriving as
+// 0x00AA00). Adding DMA sector transmit spent what margin was left: rxhi reached 31 of
+// 32, one byte from loss, and requests stopped reaching the MCU entirely -- the FPGA
+// waiting forever for a sector, the MCU idle on an empty queue, the SCSI bus parked in
+// COMMAND phase.
+//
+// The ISR below drains the FIFO into a multi-kilobyte software ring, and the task parses
+// from the ring. An interrupt preempts every task, so no amount of DMA bookkeeping,
+// libchdr decode or vTaskDelay can now cost a received byte. The hardware FIFO should sit
+// near empty from here on, which is what uart1_rx_hiwater keeps measuring.
+//
+// Single producer (ISR), single consumer (task), power-of-two size: head and tail need no
+// lock as long as each side only writes its own index.
+#define U1RX_RING_SIZE  4096u
+#define U1RX_RING_MASK  (U1RX_RING_SIZE - 1u)
+static uint8_t u1rx_ring[U1RX_RING_SIZE];
+static volatile uint32_t u1rx_head = 0;   // ISR writes
+static volatile uint32_t u1rx_tail = 0;   // task writes
+// High-water of the SOFTWARE ring, and a count of bytes dropped because it was full.
+// A nonzero drop count means the TASK is too slow, which is a different fault from the
+// FIFO overrun this replaces -- worth distinguishing rather than conflating.
+volatile uint16_t u1rx_ring_hiwater = 0;
+volatile uint32_t u1rx_ring_drops = 0;
+
+static void uart1_isr(int irq, void *arg)
+{
+    (void)irq; (void)arg;
+    uint32_t st = bflb_uart_get_intstatus(uart1_dev);
+
+    if (st & (UART_INTSTS_RX_FIFO | UART_INTSTS_RTO)) {
+        // Keep the hardware-FIFO measurement: it is now the proof the ISR is keeping up.
+        int rxcnt = bflb_uart_feature_control(uart1_dev, UART_CMD_GET_RX_FIFO_CNT, 0);
+        if (rxcnt > (int)uart1_rx_hiwater)
+            uart1_rx_hiwater = (uint16_t)rxcnt;
+
+        while (bflb_uart_rxavailable(uart1_dev)) {
+            uint8_t ch = bflb_uart_getchar(uart1_dev);
+            uint32_t nxt = (u1rx_head + 1u) & U1RX_RING_MASK;
+            if (nxt == (u1rx_tail & U1RX_RING_MASK)) {
+                u1rx_ring_drops++;      // ring full: the task is behind, not the FIFO
+                continue;               // keep draining so the FIFO never overruns
+            }
+            u1rx_ring[u1rx_head & U1RX_RING_MASK] = ch;
+            u1rx_head = nxt;
+        }
+
+        uint32_t used = (u1rx_head - u1rx_tail) & U1RX_RING_MASK;
+        if (used > u1rx_ring_hiwater)
+            u1rx_ring_hiwater = (uint16_t)used;
+    }
+    // RTO is what delivers a frame's tail when it is shorter than the FIFO threshold.
+    if (st & UART_INTSTS_RTO)
+        bflb_uart_int_clear(uart1_dev, UART_INTCLR_RTO);
+}
+
+static inline bool u1rx_get(uint8_t *ch)
+{
+    if (u1rx_tail == u1rx_head) return false;
+    *ch = u1rx_ring[u1rx_tail & U1RX_RING_MASK];
+    u1rx_tail = (u1rx_tail + 1u) & U1RX_RING_MASK;
+    return true;
+}
+
+void uart1_rx_irq_init(void)
+{
+    bflb_uart_rxint_mask(uart1_dev, false);
+    bflb_irq_attach(uart1_dev->irq_num, uart1_isr, NULL);
+    bflb_irq_enable(uart1_dev->irq_num);
+}
+
 // Receive joypad updates and other UART responses from the FPGA
 static void uart1_rx_task(void *pvParameters)
 {
@@ -553,16 +630,8 @@ static void uart1_rx_task(void *pvParameters)
     uint8_t dbg_trace_buf[8] = {0};
 
     while (1) {
-        if (bflb_uart_rxavailable(uart1_dev)) {
-            /* Direct measurement of the overflow hypothesis, instead of inferring it
-             * from corrupted LBAs. If this high-water mark reaches the hardware FIFO
-             * depth, bytes were being dropped and frames arrive truncated; if it stays
-             * well under, RX loss is NOT the remaining problem and the fault is
-             * elsewhere. Cheap: one register read per byte, no allocation, no logging. */
-            int rxcnt = bflb_uart_feature_control(uart1_dev, UART_CMD_GET_RX_FIFO_CNT, 0);
-            if (rxcnt > (int)uart1_rx_hiwater)
-                uart1_rx_hiwater = (uint16_t)rxcnt;
-            uint8_t ch = bflb_uart_getchar(uart1_dev);
+        uint8_t ch;
+        if (u1rx_get(&ch)) {
             
             if (pos == 0) {          // expecting 0xAA
                 if (ch == 0xAA) 
@@ -964,6 +1033,9 @@ int main(void)
     log_queue = xQueueCreate(LOG_QUEUE_LEN, LOG_LINE_MAX);
     xTaskCreate(log_task, "log_task", LOG_TASK_STACK_SIZE, NULL, LOG_TASK_PRIORITY, NULL);
     xTaskCreate(main_task, "main_task", MAIN_TASK_STACK_SIZE, NULL, MAIN_TASK_PRIORITY, &main_task_handle);
+    // Arm interrupt-driven RX before the parser task runs, so no byte arrives while the
+    // FIFO is still unattended. See uart1_isr's comment for why polling was not enough.
+    uart1_rx_irq_init();
     xTaskCreate(uart1_rx_task, "uart1_rx_task", UART1_RX_TASK_STACK_SIZE, NULL, UART1_RX_TASK_PRIORITY, &uart1_rx_task_handle);
     cd_req_queue = xQueueCreate(16, sizeof(cd_req_t));
     xTaskCreate(cd_serve_task, "cd_serve_task", CD_SERVE_TASK_STACK_SIZE, NULL, CD_SERVE_TASK_PRIORITY, &cd_serve_task_handle);

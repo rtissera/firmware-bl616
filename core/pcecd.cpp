@@ -594,6 +594,11 @@ void pcecd_trace_idle_tick(void) {
 }
 
 extern volatile uint16_t uart1_rx_hiwater;   // see main.cpp
+// Software RX ring, added with interrupt-driven RX. rxhi now measures how well the ISR
+// keeps the 32-byte hardware FIFO drained (should sit low); ringhi/ringdrop measure
+// whether the PARSER task keeps up with the ring, which is a different failure.
+extern volatile uint16_t u1rx_ring_hiwater;
+extern volatile uint32_t u1rx_ring_drops;
 static void pcecd_progress_tick(void) {
     // Log on a 1,2,4,8,... schedule: dense at the start where "did anything happen at
     // all" is the question, then rare, so a working stream cannot flood the SD card
@@ -604,9 +609,10 @@ static void pcecd_progress_tick(void) {
     pcecd_next_report *= 2;
     char buf[112];
     snprintf(buf, sizeof(buf),
-             "cdprog: reqs=%lu hunk_reads=%lu last_lba=%lu rxhi=%u tick=%lu",
+             "cdprog: reqs=%lu hunk_reads=%lu last_lba=%lu rxhi=%u ringhi=%u ringdrop=%lu tick=%lu",
              (unsigned long)pcecd_req_count, (unsigned long)pcecd_hunk_reads,
              (unsigned long)pcecd_last_lba, (unsigned)uart1_rx_hiwater,
+             (unsigned)u1rx_ring_hiwater, (unsigned long)u1rx_ring_drops,
              (unsigned long)xTaskGetTickCount());
     file_log(buf);
 }
