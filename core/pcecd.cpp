@@ -192,6 +192,9 @@ static void pcecd_tx_dma_isr(void *arg)
     pcecd_dma_last_ms = ms;
     if (ms > pcecd_dma_max_ms) pcecd_dma_max_ms = ms;
     pcecd_dma_done++;
+    // Leave DMA-TX mode BEFORE releasing the token: the next owner may be a blocking
+    // writer, and blocking writes into a UART in DMA-TX mode are what stalled the CD path.
+    bflb_uart_link_txdma(uart1_dev, false);
     fpga_tx_unlock_from_isr();                // the transfer owned the token; release it
 }
 
@@ -212,7 +215,15 @@ void pcecd_tx_dma_init(void)
     if (dev == NULL) return;
     bflb_dma_channel_init(dev, &cfg);
     bflb_dma_channel_irq_attach(dev, pcecd_tx_dma_isr, NULL);
-    bflb_uart_link_txdma(uart1_dev, true);
+    // UART1 is deliberately NOT put into DMA-TX mode here. It used to be, for the whole
+    // session, and that alone broke the CD path: with UART_DMA_TX_EN set, frames written
+    // the ordinary way (putchar) did not reliably finish going out. Measured 2026-09-17:
+    // a build whose dma counter read 0/0 -- not one DMA transfer ever started -- still
+    // stalled Bonk III at exactly request 163, identical to every earlier DMA build, while
+    // the only build that passed was the one where this init never ran. Sector 163's tail
+    // never reached the FPGA, so it never asked for 164.
+    // DMA-TX mode is now switched on only for the lifetime of one transfer, while that
+    // transfer owns the UART1 token; see pcecd_send_sector_dma and the completion ISR.
     pcecd_tx_dma = dev;
 }
 
@@ -228,6 +239,7 @@ static void pcecd_send_sector_dma(const uint8_t *swapped)
         // blocking path so the game keeps running. The counters say what happened.
         pcecd_dma_timeouts++;
         if (pcecd_tx_dma) bflb_dma_channel_stop(pcecd_tx_dma);
+        bflb_uart_link_txdma(uart1_dev, false);
         pcecd_dma_inflight = 0;
         pcecd_tx_dma = NULL;
         fpga_tx_unlock();                     // re-arm the token we could not obtain
@@ -256,6 +268,7 @@ static void pcecd_send_sector_dma(const uint8_t *swapped)
     pcecd_dma_inflight = 1;
     pcecd_dma_started++;
     bflb_dma_channel_lli_reload(pcecd_tx_dma, pcecd_tx_llipool, 4, tr, 1);
+    bflb_uart_link_txdma(uart1_dev, true);   // only for this transfer, token held
     bflb_dma_channel_start(pcecd_tx_dma);
     // Token intentionally NOT released here.
 }
