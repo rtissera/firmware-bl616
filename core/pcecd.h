@@ -23,3 +23,10 @@ extern bool pcecd_is_mounted(void);
 // 2352-byte raw CD-DA sector (direct 16-bit-LE stereo PCM, no header to strip).
 extern void pcecd_serve_sector(uint32_t lba);
 extern void pcecd_serve_audio_sector(uint32_t lba);
+
+// Called from cd_serve_task whenever its request queue goes quiet. Writes the per-request
+// progress ring to the SD log once per quiet period, which is how a stalled boot says
+// WHICH request it died on and how far that request got -- the hot path itself does no
+// I/O, deliberately (file_log() f_syncs every line and has truncated request frames
+// before). A new sector request re-arms it.
+extern void pcecd_trace_idle_tick(void);

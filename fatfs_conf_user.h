@@ -251,7 +251,25 @@ All configuration items must be included in the file */
 /      can be opened simultaneously under file lock control. Note that the file
 /      lock control is independent of re-entrancy. */
 
-#define FF_FS_REENTRANT 0
+/* 2026-09-14: was 0, which is why the SD card kept corrupting.
+ *
+ * Two FreeRTOS tasks touch FatFs on this read-write volume with no locking of any
+ * kind: uart1_rx_task (priority 3) writes debug.log through file_log() for every
+ * RTL[..] trace frame, and cd_serve_task (priority 2) f_read()s CHD hunks. The logger
+ * runs at the HIGHER priority, so it preempts a hunk read mid-f_read and then writes
+ * and f_syncs the same volume. FatFs keeps ONE sector window per volume (fs->win /
+ * fs->winsect); interleaving two callers flushes a dirty window to the wrong sector.
+ * On a read-only mount that is a bad read; on this one it is structural damage, and it
+ * matches exactly what fsck.exfat found -- duplicated directory entries whose clusters
+ * were already allocated to other files (fbneo, fds, gameandwatch, gamegear), plus a
+ * bad cluster reference in debug.log itself.
+ *
+ * ffsystem.c already implements ff_mutex_create/take/give for FreeRTOS (OS_TYPE 3), so
+ * enabling this covers every f_* call rather than hand-wrapping call sites and missing
+ * one. FF_FS_TIMEOUT stays 1000 ticks: the mutex is taken per f_* call, not across a
+ * whole chd_read, so contention is short.
+ */
+#define FF_FS_REENTRANT 1
 #define FF_FS_TIMEOUT   1000
 /* The option FF_FS_REENTRANT switches the re-entrancy (thread safe) of the FatFs
 /  module itself. Note that regardless of this option, file access to different

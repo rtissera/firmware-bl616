@@ -144,11 +144,51 @@ void dbg_uart_puts(const char *s) {
     bflb_uart_put(uart0_dev, (uint8_t*)"\r\n", 2);
 }
 
+// SD logging is ASYNCHRONOUS as of 2026-09-14. Two reasons, both measured:
+//
+// 1. CORRUPTION. file_log() was called from uart1_rx_task (priority 3) for every
+//    RTL[..] trace frame while cd_serve_task (priority 2) sat inside f_read() on the
+//    same volume. The logger preempts the reader, and FatFs keeps ONE sector window per
+//    volume (fs->win/fs->winsect), so the interleave flushes a dirty window to the wrong
+//    sector. That is structural damage, and fsck.exfat found exactly its signature:
+//    duplicated directory entries whose clusters were already allocated to other files
+//    (fbneo, fds, gameandwatch, gamegear) plus a bad cluster ref in debug.log itself.
+//    FF_FS_REENTRANT (see fatfs_conf_user.h) makes concurrent access safe; this removes
+//    the contention that was driving it.
+// 2. RX STARVATION. f_sync() per line blocks for milliseconds, and cd_bridge fires
+//    SECTOR_REQ the moment it has consumed 2048 bytes -- a request frame landing in that
+//    window is dropped. That is the fault PCECD_TRACE_SERVE's own comment documents.
+//    Writes now happen only on log_task, never on the RX path.
+//
+// Callers keep calling file_log() unchanged; it just enqueues. A full queue DROPS the
+// line rather than blocking, because stalling the RX path is the exact thing this
+// exists to prevent; the drop count is reported so silent loss is visible.
+#define LOG_QUEUE_LEN 48
+#define LOG_LINE_MAX  176
+static QueueHandle_t log_queue = NULL;
+static volatile uint32_t log_drops = 0;
+static uint32_t log_drops_seen = 0;
+
+static void file_log_sync(const char *msg);
+
 void file_log(const char *msg) {
-    // Live copy first: this works even before any drive is mounted, and still gets the
-    // line out if the SD write below fails or the board hangs immediately after.
+    // Live copy first, on the caller's task: works before any drive is mounted and
+    // survives a hang that would eat the queued copy.
     dbg_uart_puts(msg);
 
+    if (log_queue == NULL) {          // before the logger task exists, write inline
+        file_log_sync(msg);
+        return;
+    }
+    char line[LOG_LINE_MAX];
+    strncpy(line, msg, LOG_LINE_MAX - 1);
+    line[LOG_LINE_MAX - 1] = 0;
+    if (xQueueSend(log_queue, line, 0) != pdTRUE)
+        log_drops++;                  // never block a caller on the SD card
+}
+
+// The ONLY place that touches the filesystem for logging.
+static void file_log_sync(const char *msg) {
     if (!flog_open) {
         if (f_open(&flog, (std::string(drv) + "debug.log").c_str(), FA_WRITE | FA_OPEN_APPEND) != FR_OK)
             return;
@@ -417,6 +457,17 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
  * capturing -- so an overflow looks exactly like the observed silent hang. 32KB costs
  * 24KB of a 447KB region that is 12.77% used. The high-water mark is logged next to
  * the CD open so this stops being a guess. */
+// 8192 words = 32KB. REVERTED 2026-09-12 after shrinking this to 2048 words caused
+// "FATAL: stack overflow in task 'main_task'" during loadpcecd -- the core was then never
+// programmed into the FPGA at all, so the board showed nothing, not even the system card.
+//
+// My justification for shrinking it was a measurement of 29736 bytes still free, but that
+// was sampled at an idle moment, NOT during the CHD load path (libchdr chd_open plus
+// FatFs) which runs on this task. A high-water figure only bounds the paths actually
+// exercised when it was taken.
+//
+// There is no RAM pressure here to justify trimming: ram_memory sits at ~13% of 447KB.
+// Do not shrink again without a high-water mark captured DURING a CHD load.
 #define MAIN_TASK_STACK_SIZE  8192
 #define MAIN_TASK_PRIORITY    3
 /* 2026-09-11: was 512 words (2KB), and the SD-logged stack-overflow hook caught it:
@@ -431,22 +482,58 @@ int joy_choice(int start_line, int len, int *active, int overlay_key_code) {
  * to 8192 earlier while chasing the same symptom and measured 29736 bytes still free,
  * because the decode was never on main_task at all. See the high-water marks logged next
  * to SERVED: to right-size BOTH of these afterwards. */
+// 8192 words = 32KB. Also reverted: this task still handles the floppy read/write paths
+// (a 512-byte buffer plus FatFs f_read/f_lseek) and the overlay, so "it only parses
+// 5-byte frames now" was wrong. Shrinking two stacks in one step also meant a single
+// failure could not be attributed to either.
 #define UART1_RX_TASK_STACK_SIZE  8192
 #define UART1_RX_TASK_PRIORITY    3
 
 // Serves CD sector requests off the RX path. Priority is BELOW uart1_rx_task so that
 // draining the UART always wins over decoding a hunk -- the whole point of the split.
-#define CD_SERVE_TASK_STACK_SIZE  8192   // libchdr decode runs here now, not on the RX task
+// 4096 words = 16KB. libchdr's decode runs here. Measured peak on hardware was ~2.2KB
+// (uxTaskGetStackHighWaterMark reports minimum-ever-free, so it does capture chd_read),
+// but that was one disc's codec path -- 16KB keeps ~7x margin for a CHD that decodes
+// differently, because a stack overflow here fails silently and cost a full day once.
+// Drains the log queue onto the SD card. Priority 1 -- BELOW cd_serve_task (2) and
+// uart1_rx_task (3) -- so logging can never preempt a hunk decode or the UART RX path.
+// That ordering is the point: the old code logged from the highest-priority task.
+#define LOG_TASK_STACK_SIZE   2048
+#define LOG_TASK_PRIORITY     1
+static void log_task(void *pvParameters)
+{
+    char line[LOG_LINE_MAX];
+    for (;;) {
+        if (xQueueReceive(log_queue, line, portMAX_DELAY) == pdTRUE)
+            file_log_sync(line);
+        // Report dropped lines once the burst has passed, so a full queue is never
+        // silent -- absence of a line would otherwise read as absence of the event.
+        if (log_drops != log_drops_seen && uxQueueMessagesWaiting(log_queue) == 0) {
+            char b[64];
+            snprintf(b, sizeof(b), "LOG-DROPS: %lu lines lost (queue full)",
+                     (unsigned long)log_drops);
+            log_drops_seen = log_drops;
+            file_log_sync(b);
+        }
+    }
+}
+
+#define CD_SERVE_TASK_STACK_SIZE  8192
 #define CD_SERVE_TASK_PRIORITY    2
 static void cd_serve_task(void *pvParameters)
 {
     cd_req_t req;
     for (;;) {
-        if (xQueueReceive(cd_req_queue, &req, portMAX_DELAY) == pdTRUE) {
+        // Bounded wait rather than portMAX_DELAY: a timeout here means the CD path has
+        // gone quiet, which is exactly the stalled state worth dumping. Serving is
+        // unaffected -- a queued request still wakes this immediately.
+        if (xQueueReceive(cd_req_queue, &req, pdMS_TO_TICKS(1000)) == pdTRUE) {
             if (req.is_audio)
                 pcecd_serve_audio_sector(req.lba);
             else
                 pcecd_serve_sector(req.lba);
+        } else {
+            pcecd_trace_idle_tick();
         }
     }
 }
@@ -610,6 +697,15 @@ static void uart1_rx_task(void *pvParameters)
                 pos = 0; // Reset if we get out of sync
             }
         }
+
+        // Idle path of the RX task -- reached only when no byte is pending. This task
+        // runs at UART1_RX_TASK_PRIORITY (3), ABOVE cd_serve_task (2), so it keeps
+        // running even when a sector serve is wedged inside chd_read() and never
+        // returns to its own queue-receive timeout. That is precisely the case the
+        // request ring exists to name, so the flush cannot live only in the serve task.
+        // Self-gating on "a disc is mounted and 3s quiet", so it costs one tick
+        // comparison per millisecond and writes nothing while sectors are flowing.
+        pcecd_trace_idle_tick();
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -854,6 +950,10 @@ int main(void)
 
     overlay_status("Creating tasks...");
     // Create the tasks
+    // Logger first: file_log() falls back to a direct (blocking) write while
+    // log_queue is NULL, so create it before anything that logs.
+    log_queue = xQueueCreate(LOG_QUEUE_LEN, LOG_LINE_MAX);
+    xTaskCreate(log_task, "log_task", LOG_TASK_STACK_SIZE, NULL, LOG_TASK_PRIORITY, NULL);
     xTaskCreate(main_task, "main_task", MAIN_TASK_STACK_SIZE, NULL, MAIN_TASK_PRIORITY, &main_task_handle);
     xTaskCreate(uart1_rx_task, "uart1_rx_task", UART1_RX_TASK_STACK_SIZE, NULL, UART1_RX_TASK_PRIORITY, &uart1_rx_task_handle);
     cd_req_queue = xQueueCreate(16, sizeof(cd_req_t));

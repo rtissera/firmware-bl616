@@ -191,6 +191,10 @@ bool pcecd_is_mounted(void) {
     return pcecd_chd != NULL;
 }
 
+// Clears the per-session trace one-shots and the request ring. Defined further down,
+// with the state it owns; declared here because pcecd_unload() precedes all of it.
+static void pcecd_trace_reset(void);
+
 void pcecd_unload(void) {
     if (pcecd_chd) {
         chd_close(pcecd_chd);
@@ -203,6 +207,11 @@ void pcecd_unload(void) {
     }
     pcecd_cached_hunk = 0xFFFFFFFF;
     pcecd_sectors_per_hunk = 0;
+    // Re-arm the per-session one-shots. Without this a disc loaded a second time in one
+    // MCU session inherits the first load's spent flags, so its SERVE-FAIL / DECODE-START
+    // / SERVED lines never appear and the run reads as "no failure occurred". Defined
+    // below, next to the counters it clears (they are declared after this function).
+    pcecd_trace_reset();
     pcecd_send_mount(0);
 }
 
@@ -257,7 +266,12 @@ static uint32_t pcecd_next_report = 1;
 // request frames in the first place. It still costs an SD write per sector, so it
 // visibly slows serving and CHANGES TIMING -- treat it as a diagnostic build, not a
 // representative one, and turn it off before judging whether a game runs.
-#define PCECD_TRACE_SECTORS 1
+// OFF. This was for the one-time golden-trace diff against beetle-pce-fast (done, and
+// every sector matched). Leaving it on costs an f_sync per sector, which made serves slow
+// enough to trip cd_bridge's request watchdog and duplicate whole sectors -- 12 requests
+// for a 2-sector read, and LOAD ERROR. Turn on only for another offline diff, never for
+// judging whether a game runs.
+#define PCECD_TRACE_SECTORS 0
 #define PCECD_TRACE_SECTORS_MAX 1500
 static uint32_t pcecd_sec_logged = 0;
 
@@ -269,6 +283,150 @@ static void pcecd_log_once(const char *msg) {
     if (pcecd_fail_logged) return;
     pcecd_fail_logged = 1;
     file_log(msg);
+}
+
+
+// ---------------------------------------------------------------------------
+// Per-request progress ring (2026-09-13).
+//
+// The board stalls with cd_bridge parked in SCSI_READ_WAIT_BYTE (trace tag 0xD2,
+// state 5, on every one of 113 consecutive samples) -- it asked for a sector and
+// no byte ever came back. REQ_WATCHDOG is false in cd_bridge.vhd, so that wait is
+// permanent and every later host command is blocked behind it.
+//
+// Nothing in the log could say which request that was, because both of the existing
+// probes go quiet exactly there:
+//   * pcecd_progress_tick() logs on a 1,2,4,8,... schedule, so requests 5,6,7 are
+//     silent and the next line would only come at 8;
+//   * DECODE-START is gated by pcecd_decode_logged, a one-shot, so only the FIRST
+//     hunk decode of the session is ever announced;
+//   * SERVE-FAIL goes through pcecd_log_once(), also one-shot for the whole boot --
+//     and this disc gets loaded more than once per session, so a real failure on the
+//     second load is suppressed by the first load's flag.
+//
+// Logging per request on the hot path is not an option: file_log() f_syncs every
+// line, which is what truncated sector-request frames before (see PCECD_TRACE_SERVE's
+// own comment) and what duplicated whole sectors when PCECD_TRACE_SECTORS was left on.
+// So record progress into RAM -- a few stores, no I/O -- and write it out only once
+// serving has gone quiet, which is precisely the stalled state we want to inspect.
+//
+// stage values are cumulative high-water marks, so the LAST stage an entry reached is
+// the answer: an entry stuck at 3 was inside chd_read() when everything stopped, which
+// a log that simply ends cannot distinguish from a request that never arrived at all.
+#define PCECD_RING_N 64
+#define PCECD_RG_ENTER   1   // request dequeued, handler entered
+#define PCECD_RG_MAPPED  2   // lba -> file frame -> hunk resolved
+#define PCECD_RG_DECODE  3   // inside chd_read()
+#define PCECD_RG_DECODED 4   // chd_read() returned
+#define PCECD_RG_SENT    5   // both chunks handed to the UART
+#define PCECD_RG_F_MOUNT 0x81 // no disc mounted
+#define PCECD_RG_F_LEAD  0x82 // past lead-out
+#define PCECD_RG_F_TRACK 0x83 // in no track extent
+#define PCECD_RG_F_READ  0x84 // chd_read() returned an error
+
+typedef struct {
+    uint32_t lba;
+    uint32_t hunk;
+    uint32_t tick;
+    uint8_t  stage;
+    uint8_t  err;      // chd_error when stage == PCECD_RG_F_READ
+    uint8_t  audio;
+} pcecd_ring_e;
+
+static pcecd_ring_e pcecd_ring[PCECD_RING_N];
+static uint32_t pcecd_ring_used = 0;     // entries filled, saturates at PCECD_RING_N
+static int32_t  pcecd_ring_cur  = -1;    // entry the in-flight request is using
+static uint32_t pcecd_ring_last_tick = 0;
+static uint8_t  pcecd_ring_flushed = 0;   // ring written for the current quiet period
+static uint32_t pcecd_ring_flushed_upto = 0;  // entries already written, never reprinted
+
+// Begin a ring entry. Requests past PCECD_RING_N are counted by pcecd_req_count but
+// not traced -- the interesting window is the boot handful, and a fixed array keeps
+// this allocation-free on a path where malloc has broken hardware runs before.
+static void pcecd_ring_begin(uint32_t lba, uint8_t audio) {
+    pcecd_ring_last_tick = (uint32_t)xTaskGetTickCount();
+    pcecd_ring_flushed = 0;
+    if (pcecd_ring_used >= PCECD_RING_N) { pcecd_ring_cur = -1; return; }
+    pcecd_ring_cur = (int32_t)pcecd_ring_used++;
+    pcecd_ring_e *e = &pcecd_ring[pcecd_ring_cur];
+    e->lba = lba; e->hunk = 0xFFFFFFFF; e->tick = pcecd_ring_last_tick;
+    e->stage = PCECD_RG_ENTER; e->err = 0; e->audio = audio;
+}
+
+static void pcecd_ring_mark(uint8_t stage, uint32_t hunk, uint8_t err) {
+    pcecd_ring_last_tick = (uint32_t)xTaskGetTickCount();
+    if (pcecd_ring_cur < 0) return;
+    pcecd_ring_e *e = &pcecd_ring[pcecd_ring_cur];
+    e->stage = stage;
+    if (hunk != 0xFFFFFFFF) e->hunk = hunk;
+    if (err) e->err = err;
+}
+
+static void pcecd_trace_reset(void) {
+    pcecd_fail_logged = 0;
+    pcecd_served_logged = 0;
+    pcecd_decode_logged = 0;
+    pcecd_sec_logged = 0;
+    pcecd_req_count = 0;
+    pcecd_hunk_reads = 0;
+    pcecd_next_report = 1;
+    pcecd_ring_used = 0;
+    pcecd_ring_cur = -1;
+    pcecd_ring_flushed = 0;
+    pcecd_ring_flushed_upto = 0;
+    // Measure the quiet window from the load, not from whatever the last session left
+    // here -- otherwise the first idle tick after a load fires instantly.
+    pcecd_ring_last_tick = (uint32_t)xTaskGetTickCount();
+}
+
+static const char *pcecd_ring_stage_name(uint8_t s) {
+    switch (s) {
+        case PCECD_RG_ENTER:   return "ENTER";
+        case PCECD_RG_MAPPED:  return "MAPPED";
+        case PCECD_RG_DECODE:  return "IN-CHD_READ";
+        case PCECD_RG_DECODED: return "DECODED";
+        case PCECD_RG_SENT:    return "SENT";
+        case PCECD_RG_F_MOUNT: return "FAIL-NOMOUNT";
+        case PCECD_RG_F_LEAD:  return "FAIL-LEADOUT";
+        case PCECD_RG_F_TRACK: return "FAIL-NOTRACK";
+        case PCECD_RG_F_READ:  return "FAIL-CHDREAD";
+        default:               return "?";
+    }
+}
+
+// Called from cd_serve_task when its queue receive times out, i.e. exactly when the CD
+// path has gone quiet. Writes the ring once per quiet period; a new request re-arms it.
+void pcecd_trace_idle_tick(void) {
+    if (!PCECD_TRACE_SERVE) return;
+    if (pcecd_ring_flushed) return;
+    // Only once a disc is actually mounted: before that there is nothing to say, and
+    // this runs from the UART RX task's idle path, which must stay cheap.
+    if (!pcecd_chd) return;
+    uint32_t now = (uint32_t)xTaskGetTickCount();
+    if ((now - pcecd_ring_last_tick) < pdMS_TO_TICKS(3000)) return;
+    pcecd_ring_flushed = 1;
+    char b[160];
+    // Printed even when nothing was traced. "0 traced of 0 total" is a positive
+    // statement -- the MCU is alive, a disc is mounted, and no sector request ever
+    // arrived -- which is a different fault from a log that simply stops, and the
+    // difference between those two has misled this investigation twice already.
+    snprintf(b, sizeof(b), "REQRING: %lu traced of %lu total, quiet %lums, hunk_reads=%lu",
+             (unsigned long)pcecd_ring_used, (unsigned long)pcecd_req_count,
+             (unsigned long)((now - pcecd_ring_last_tick) * portTICK_PERIOD_MS),
+             (unsigned long)pcecd_hunk_reads);
+    file_log(b);
+    // Only entries not yet written. Re-arming on every request would otherwise redump
+    // the whole ring after each >=3s pause in normal play -- up to 64 f_syncs, mid-game.
+    for (uint32_t i = pcecd_ring_flushed_upto; i < pcecd_ring_used; i++) {
+        const pcecd_ring_e *e = &pcecd_ring[i];
+        snprintf(b, sizeof(b), "REQ %2lu lba=%-7lu hunk=%-7ld %s%s err=%d t=%lu",
+                 (unsigned long)(i + 1), (unsigned long)e->lba,
+                 (long)(int32_t)e->hunk, e->audio ? "AUDIO " : "",
+                 pcecd_ring_stage_name(e->stage), (int)e->err,
+                 (unsigned long)e->tick);
+        file_log(b);
+    }
+    pcecd_ring_flushed_upto = pcecd_ring_used;
 }
 
 extern volatile uint16_t uart1_rx_hiwater;   // see main.cpp
@@ -306,8 +464,10 @@ static bool pcecd_lba_to_file_frame(uint32_t lba, uint32_t *out) {
 }
 
 void pcecd_serve_sector(uint32_t lba) {
-    pcecd_req_count++; pcecd_last_lba = lba; pcecd_progress_tick();
+    pcecd_req_count++; pcecd_last_lba = lba; pcecd_ring_begin(lba, 0);
+    pcecd_progress_tick();
     if (!pcecd_chd || pcecd_sectors_per_hunk == 0) {
+        pcecd_ring_mark(PCECD_RG_F_MOUNT, 0xFFFFFFFF, 0);
         pcecd_log_once("SERVE-FAIL: no disc mounted (pcecd_chd NULL or spq 0)");
         return;
     }
@@ -320,6 +480,7 @@ void pcecd_serve_sector(uint32_t lba) {
         char b[80];
         snprintf(b, sizeof(b), "SERVE-FAIL: LBA %lu past lead-out %lu",
                  (unsigned long)lba, (unsigned long)pcecd_toc_lba[100]);
+        pcecd_ring_mark(PCECD_RG_F_LEAD, 0xFFFFFFFF, 0);
         pcecd_log_once(b);
         return;
     }
@@ -329,11 +490,13 @@ void pcecd_serve_sector(uint32_t lba) {
         char b[80];
         snprintf(b, sizeof(b), "SERVE-FAIL: LBA %lu in no track extent (ntracks=%d)",
                  (unsigned long)lba, pcecd_toc_num_tracks);
+        pcecd_ring_mark(PCECD_RG_F_TRACK, 0xFFFFFFFF, 0);
         pcecd_log_once(b);
         return;
     }
     uint32_t hunknum = fframe / pcecd_sectors_per_hunk;
     uint32_t sector_in_hunk = fframe % pcecd_sectors_per_hunk;
+    pcecd_ring_mark(PCECD_RG_MAPPED, hunknum, 0);
 
     if (hunknum != pcecd_cached_hunk) {
         // Announce the decode BEFORE running it. Without this, "returned early" and
@@ -354,8 +517,10 @@ void pcecd_serve_sector(uint32_t lba) {
                      (unsigned long)hunknum, (unsigned long)sector_in_hunk);
             file_log(b);
         }
+        pcecd_ring_mark(PCECD_RG_DECODE, hunknum, 0);
         chd_error err = chd_read(pcecd_chd, hunknum, pcecd_hunk_buf);
         if (err != CHDERR_NONE) {
+            pcecd_ring_mark(PCECD_RG_F_READ, hunknum, (uint8_t)err);
             char b[176], h[96];
             pcecd_heap_str(h, sizeof(h));
             snprintf(b, sizeof(b), "SERVE-FAIL: chd_read(hunk %lu) = %d (%s) after %lu hunks | %s",
@@ -364,6 +529,7 @@ void pcecd_serve_sector(uint32_t lba) {
             pcecd_log_once(b);
             return;
         }
+        pcecd_ring_mark(PCECD_RG_DECODED, hunknum, 0);
         pcecd_cached_hunk = hunknum;
         pcecd_hunk_reads++;
     }
@@ -380,6 +546,7 @@ void pcecd_serve_sector(uint32_t lba) {
     }
     pcecd_send_sector_chunk(0, raw, 1024);
     pcecd_send_sector_chunk(1, raw + 1024, 1024);
+    pcecd_ring_mark(PCECD_RG_SENT, 0xFFFFFFFF, 0);
 
     // One-shot proof that a sector was actually decoded AND sent, with the mapping that
     // produced it -- lba, the file frame it resolved to, the hunk, and the first bytes of
@@ -411,24 +578,30 @@ void pcecd_serve_sector(uint32_t lba) {
 // this is 1176+1176 rather than 1024+1024, only that SECTOR_DATA_LAST pulses on the
 // real last byte.
 void pcecd_serve_audio_sector(uint32_t lba) {
-    pcecd_req_count++; pcecd_last_lba = lba; pcecd_progress_tick();
+    pcecd_req_count++; pcecd_last_lba = lba; pcecd_ring_begin(lba, 1);
+    pcecd_progress_tick();
+    // These three returns used DEBUG() -> dprint -> UART0, which nothing on this board
+    // captures, so an audio request that was silently declined looked exactly like one
+    // that was served -- and declining it wedges the bus, because cd_bridge waits in
+    // SCSI_READ_WAIT_BYTE for a SECTOR_DATA_LAST that now never comes (REQ_WATCHDOG is
+    // false). They record into the ring like the data path, which costs no I/O here.
     if (!pcecd_chd || pcecd_sectors_per_hunk == 0) {
-        DEBUG("pcecd_serve_audio_sector: no disc mounted, ignoring LBA %u\n", (unsigned)lba);
+        pcecd_ring_mark(PCECD_RG_F_MOUNT, 0xFFFFFFFF, 0);
         return;
     }
     if (lba >= pcecd_toc_lba[100]) {
-        DEBUG("pcecd_serve_audio_sector: LBA %u past real lead-out %u, ignoring\n",
-              (unsigned)lba, (unsigned)pcecd_toc_lba[100]);
+        pcecd_ring_mark(PCECD_RG_F_LEAD, 0xFFFFFFFF, 0);
         return;
     }
 
     uint32_t fframe;
     if (!pcecd_lba_to_file_frame(lba, &fframe)) {
-        DEBUG("serve: LBA %u is in no track extent, ignoring\n", (unsigned)lba);
+        pcecd_ring_mark(PCECD_RG_F_TRACK, 0xFFFFFFFF, 0);
         return;
     }
     uint32_t hunknum = fframe / pcecd_sectors_per_hunk;
     uint32_t sector_in_hunk = fframe % pcecd_sectors_per_hunk;
+    pcecd_ring_mark(PCECD_RG_MAPPED, hunknum, 0);
 
     if (hunknum != pcecd_cached_hunk) {
         // Announce the decode BEFORE running it. Without this, "returned early" and
@@ -449,12 +622,13 @@ void pcecd_serve_audio_sector(uint32_t lba) {
                      (unsigned long)hunknum, (unsigned long)sector_in_hunk);
             file_log(b);
         }
+        pcecd_ring_mark(PCECD_RG_DECODE, hunknum, 0);
         chd_error err = chd_read(pcecd_chd, hunknum, pcecd_hunk_buf);
         if (err != CHDERR_NONE) {
-            DEBUG("pcecd_serve_audio_sector: chd_read(hunk %u) failed: %s\n",
-                  (unsigned)hunknum, chd_error_string(err));
+            pcecd_ring_mark(PCECD_RG_F_READ, hunknum, (uint8_t)err);
             return;
         }
+        pcecd_ring_mark(PCECD_RG_DECODED, hunknum, 0);
         pcecd_cached_hunk = hunknum;
         pcecd_hunk_reads++;
     }
@@ -462,6 +636,7 @@ void pcecd_serve_audio_sector(uint32_t lba) {
     const uint8_t *raw = pcecd_hunk_buf + (uint32_t)sector_in_hunk * PCECD_RAW_UNIT_BYTES;
     pcecd_send_sector_chunk(0, raw, PCECD_AUDIO_BYTES / 2);
     pcecd_send_sector_chunk(0xFF, raw + PCECD_AUDIO_BYTES / 2, PCECD_AUDIO_BYTES / 2);
+    pcecd_ring_mark(PCECD_RG_SENT, 0xFFFFFFFF, 0);
 }
 
 // Real TOC walk, computing real per-track start LBA + control byte using the exact same
