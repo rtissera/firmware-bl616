@@ -20,6 +20,7 @@ int overlay_on() {
 
 void overlay_cursor(int col, int row) {
     // uart1 command: 4 x[7:0] y[7:0]
+    if (fpga_tx_drain_hook) fpga_tx_drain_hook();   // outside the critical section, never inside
     taskENTER_CRITICAL();
     fpga_tx_header(0x04, 3);
     fpga_tx_byte(col);
@@ -35,6 +36,7 @@ void dprint(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
+    if (fpga_tx_drain_hook) fpga_tx_drain_hook();   // outside the critical section, never inside
     taskENTER_CRITICAL();
     int len = strlen(buf);
     fpga_tx_header(0x0d, len+1);
@@ -51,6 +53,7 @@ void overlay_printf(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
+    if (fpga_tx_drain_hook) fpga_tx_drain_hook();   // outside the critical section, never inside
     taskENTER_CRITICAL();
     int len = strlen(buf);
     fpga_tx_header(0x05, len+1);
@@ -77,6 +80,7 @@ void overlay_status(const char *fmt, ...) {
     buf[255] = '\0';
 
     overlay_cursor(1, 27);
+    if (fpga_tx_drain_hook) fpga_tx_drain_hook();   // outside the critical section, never inside
     taskENTER_CRITICAL();
     int len = strlen(buf);
     fpga_tx_header(0x05, len+1);
@@ -154,6 +158,7 @@ void overlay_message(const char *msg, int center) {
 
 // turn overlay on/off
 void overlay(int state) {
+    if (fpga_tx_drain_hook) fpga_tx_drain_hook();   // outside the critical section, never inside
     taskENTER_CRITICAL();
     _overlay_on = state;
     fpga_tx_header(0x08, 2);

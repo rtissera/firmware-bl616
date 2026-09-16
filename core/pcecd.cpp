@@ -200,6 +200,13 @@ static void pcecd_tx_dma_isr(void *arg)
 void pcecd_tx_drain(void)
 {
     if (pcecd_tx_dma == NULL) return;
+    // MUST be called with interrupts enabled and not from a critical section: what
+    // releases this loop is the DMA completion ISR. Waiting on it with interrupts off
+    // can never finish. xTaskGetSchedulerState() catches the scheduler-suspended case;
+    // the critical-section case is prevented by construction -- no caller invokes this
+    // between taskENTER_CRITICAL() and taskEXIT_CRITICAL(), and fpga_tx_header()
+    // deliberately does NOT call the hook for that reason.
+    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return;
     while (pcecd_txq_count > 0 || bflb_dma_channel_isbusy(pcecd_tx_dma))
         vTaskDelay(1);
 }
@@ -293,6 +300,7 @@ static uint32_t pcecd_toc_sectors[101];   // playable sectors, for the track loo
 static int      pcecd_toc_num_tracks = 0;
 
 static void pcecd_send_mount(uint8_t mounted) {
+    if (fpga_tx_drain_hook) fpga_tx_drain_hook();   // outside the critical section, never inside
     taskENTER_CRITICAL();
     fpga_tx_header(0x0e, 2);
     fpga_tx_byte(mounted);

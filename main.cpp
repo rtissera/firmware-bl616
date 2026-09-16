@@ -372,6 +372,10 @@ static void send_hid_to_core(void) {
         uint16_t joy1=0, joy2=0, hid1=0, hid2=0;    
         get_joypad_states(&joy1, &joy2, &hid1, &hid2);
         if (first || hid1 != hid1_old || hid2 != hid2_old) {    // send HID if changed
+            // This runs continuously during gameplay and is the one blocking FPGA
+            // writer that overlaps CD-DA. Let any in-flight sector DMA finish first or
+            // the two frames interleave. Safe here: no critical section is held.
+            if (fpga_tx_drain_hook) fpga_tx_drain_hook();
             fpga_tx_header(0x09, 5);
             fpga_tx_byte(hid1 >> 8);
             fpga_tx_byte(hid1 & 0xff);

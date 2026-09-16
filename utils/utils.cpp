@@ -1,14 +1,16 @@
 #include "tc_utils.h"
 
-// Registered by the CD core once it has a DMA channel (pcecd.cpp). Sector data goes out
-// by DMA; every other frame here is still a blocking putchar, and if one of those
-// interleaves with an in-flight DMA both frames are corrupted. Every blocking frame
-// therefore drains the DMA ring first. A function pointer rather than a direct call so
-// utils keeps no dependency on the CD core -- builds without it are unaffected.
+// Registered by the CD core once it has a DMA channel (pcecd.cpp), and called by CD
+// senders BEFORE they take their critical section -- never from inside one.
+//
+// It must not be called from fpga_tx_header(): callers wrap whole frames in
+// taskENTER_CRITICAL(), and the drain waits on the DMA completion ISR, which cannot run
+// with interrupts disabled. That deadlocks, and it deadlocks only once CD-DA starts
+// (before that the ring is empty and the drain returns immediately), which is exactly
+// how it presented -- data loading fine, then a hard stop the moment music began.
 void (*fpga_tx_drain_hook)(void) = NULL;
 
 void fpga_tx_header(int cmd, int len) {
-    if (fpga_tx_drain_hook) fpga_tx_drain_hook();
     bflb_uart_putchar(uart1_dev, 0xAA);
     bflb_uart_putchar(uart1_dev, len >> 8);
     bflb_uart_putchar(uart1_dev, len & 0xFF);
