@@ -115,6 +115,8 @@ extern USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE
 extern bool mounted_a;
 
 extern struct bflb_device_s *uart1_dev;
+// See utils.cpp: lets the CD core make blocking UART1 frames wait for its sector DMA.
+extern void (*fpga_tx_drain_hook)(void);
 
 // len: length of payload including the command (>=1)
 extern void fpga_tx_header(int cmd, int len);

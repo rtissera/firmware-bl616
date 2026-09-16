@@ -30,3 +30,9 @@ extern void pcecd_serve_audio_sector(uint32_t lba);
 // I/O, deliberately (file_log() f_syncs every line and has truncated request frames
 // before). A new sector request re-arms it.
 extern void pcecd_trace_idle_tick(void);
+
+// DMA sector transmit (2026-09-16). pcecd_tx_dma_init() claims dma0_ch0, links it to
+// UART1 TX and registers the drain hook; call it once after the UART is up. Without it
+// the sector path silently falls back to the old blocking write.
+extern void pcecd_tx_dma_init(void);
+extern void pcecd_tx_drain(void);

@@ -923,6 +923,11 @@ int main(void)
     init_gpio_and_uart();
     uart_dbg("BOOT: init_gpio_and_uart done, console alive");
 
+    // CD sector transmit moves to DMA so the CPU is free during the 11.76 ms of wire
+    // time per sector -- that is where the ~62 ms libchdr hunk decode has to hide if
+    // CD-DA is to keep up. See core/pcecd.cpp's DMA SECTOR TRANSMIT comment.
+    pcecd_tx_dma_init();
+
     print_system_info();
 
     // Create mutex for joypad states
