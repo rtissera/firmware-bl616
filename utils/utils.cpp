@@ -1,14 +1,74 @@
 #include "tc_utils.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
 
-// Registered by the CD core once it has a DMA channel (pcecd.cpp), and called by CD
-// senders BEFORE they take their critical section -- never from inside one.
+// UART1 OWNERSHIP (2026-09-17).
 //
-// It must not be called from fpga_tx_header(): callers wrap whole frames in
-// taskENTER_CRITICAL(), and the drain waits on the DMA completion ISR, which cannot run
-// with interrupts disabled. That deadlocks, and it deadlocks only once CD-DA starts
-// (before that the ring is empty and the drain returns immediately), which is exactly
-// how it presented -- data loading fine, then a hard stop the moment music began.
-void (*fpga_tx_drain_hook)(void) = NULL;
+// UART1 is the FPGA link, and more than one task writes frames to it: sector data, TOC,
+// joypad/HID, overlay text, floppy, keyboard. A frame is only valid if its bytes go out
+// contiguously -- iosys_bl616.v counts `len` bytes after the 0xAA header, so any foreign
+// byte landing inside a frame shifts every byte after it and the frame never completes.
+//
+// That exclusion used to come from taskENTER_CRITICAL() around each blocking write. It
+// worked, but it was a side effect: with interrupts off for a whole 1026-byte data chunk
+// (~5 ms at 2 Mbaud) the RX side cannot be serviced either, and a 32-byte RX FIFO at
+// 2 Mbaud overflows in ~1.6 ms. And it cannot express a DMA transfer at all, which runs
+// for 11.8 ms with interrupts ENABLED -- which is exactly why DMA hung: once the critical
+// section was gone, other writers could land inside a sector frame.
+//
+// So exclusion is now explicit: a binary semaphore is the UART1 token. Blocking writers
+// take it and give it back. A DMA transfer takes it in task context and the DMA
+// COMPLETION ISR gives it back (a binary semaphore, not a mutex, precisely so an ISR may
+// release it). The task that started the DMA is free to go and decode the next hunk while
+// the token is held by the transfer.
+//
+// Takes time out instead of blocking forever: a DMA completion that never arrives would
+// otherwise silence every writer on the board, the menu included. A timeout is counted in
+// fpga_tx_lock_timeouts and the writer proceeds -- degraded and visible, never wedged.
+static SemaphoreHandle_t fpga_tx_sem = NULL;
+volatile uint32_t fpga_tx_lock_timeouts = 0;
+static volatile uint8_t fpga_tx_owned_by_isr = 0;
+
+void fpga_tx_lock_init(void)
+{
+    if (fpga_tx_sem == NULL) {
+        fpga_tx_sem = xSemaphoreCreateBinary();
+        if (fpga_tx_sem) xSemaphoreGive(fpga_tx_sem);
+    }
+}
+
+// Before the scheduler starts there is one thread of execution, so no lock is needed --
+// and blocking is not allowed. Same for a missing semaphore.
+static bool fpga_tx_lock_active(void)
+{
+    return fpga_tx_sem != NULL && xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
+}
+
+bool fpga_tx_lock_timed(uint32_t ms)
+{
+    if (!fpga_tx_lock_active()) return true;
+    if (xSemaphoreTake(fpga_tx_sem, pdMS_TO_TICKS(ms)) == pdTRUE) return true;
+    fpga_tx_lock_timeouts++;
+    return false;
+}
+
+void fpga_tx_lock(void)   { (void)fpga_tx_lock_timed(500); }
+
+void fpga_tx_unlock(void)
+{
+    if (!fpga_tx_lock_active()) return;
+    xSemaphoreGive(fpga_tx_sem);    // harmless no-op if already available
+}
+
+// Called only from an ISR (the DMA transfer-complete callback).
+void fpga_tx_unlock_from_isr(void)
+{
+    if (fpga_tx_sem == NULL) return;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(fpga_tx_sem, &woken);
+    portYIELD_FROM_ISR(woken);
+}
 
 void fpga_tx_header(int cmd, int len) {
     bflb_uart_putchar(uart1_dev, 0xAA);

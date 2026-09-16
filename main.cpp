@@ -113,8 +113,10 @@ const char *BOARD_NAME = "unknown";
 
 // Override system printf() to send to FPGA
 int __attribute__((weak)) putchar(int ch) {
+    fpga_tx_lock();
     fpga_tx_header(0x05, 2);
     fpga_tx_byte(ch);
+    fpga_tx_unlock();
     return ch;
 }
 
@@ -372,15 +374,15 @@ static void send_hid_to_core(void) {
         uint16_t joy1=0, joy2=0, hid1=0, hid2=0;    
         get_joypad_states(&joy1, &joy2, &hid1, &hid2);
         if (first || hid1 != hid1_old || hid2 != hid2_old) {    // send HID if changed
-            // This runs continuously during gameplay and is the one blocking FPGA
-            // writer that overlaps CD-DA. Let any in-flight sector DMA finish first or
-            // the two frames interleave. Safe here: no critical section is held.
-            if (fpga_tx_drain_hook) fpga_tx_drain_hook();
+            // Runs continuously during gameplay, so it is the writer most likely to meet
+            // an in-flight sector. The token makes the whole frame atomic against it.
+            fpga_tx_lock();
             fpga_tx_header(0x09, 5);
             fpga_tx_byte(hid1 >> 8);
             fpga_tx_byte(hid1 & 0xff);
             fpga_tx_byte(hid2 >> 8);
             fpga_tx_byte(hid2 & 0xff);
+            fpga_tx_unlock();
             hid1_old = hid1;
             hid2_old = hid2;
             first = false;
@@ -703,10 +705,12 @@ static void uart1_rx_task(void *pvParameters)
                         UINT br;
                         f_lseek(&f_floppy[drive], sector * 512);
                         if (f_read(&f_floppy[drive], fbuf, 512, &br) == FR_OK) {
+                            fpga_tx_lock();
                             fpga_tx_header(0x0a, br+1);
                             for (UINT i = 0; i < br; i++) {
                                 fpga_tx_byte(fbuf[i]);
                             }
+                            fpga_tx_unlock();
                         } else {
                             overlay_status("Failed to read floppy");
                         }

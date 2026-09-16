@@ -115,8 +115,14 @@ extern USB_NOCACHE_RAM_SECTION BYTE __attribute__((aligned(64))) fbuf[BLOCK_SIZE
 extern bool mounted_a;
 
 extern struct bflb_device_s *uart1_dev;
-// See utils.cpp: lets the CD core make blocking UART1 frames wait for its sector DMA.
-extern void (*fpga_tx_drain_hook)(void);
+// UART1 ownership token -- see utils.cpp. Every FPGA frame writer takes it; a DMA
+// transfer takes it and the DMA completion ISR releases it.
+extern void fpga_tx_lock_init(void);
+extern void fpga_tx_lock(void);
+extern bool fpga_tx_lock_timed(uint32_t ms);
+extern void fpga_tx_unlock(void);
+extern void fpga_tx_unlock_from_isr(void);
+extern volatile uint32_t fpga_tx_lock_timeouts;
 
 // len: length of payload including the command (>=1)
 extern void fpga_tx_header(int cmd, int len);

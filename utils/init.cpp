@@ -82,7 +82,17 @@ void init_gpio_and_uart() {
     /* Initialize UART1 with the config */
     bflb_uart_init(uart1_dev, &uart1_cfg);
 
-    bflb_uart_set_console(uart1_dev);       // for debug
+    // Console (SDK printf) goes to UART0, NOT UART1. UART1 is the FPGA link, and SDK log
+    // output written there raw can land inside a frame and corrupt it -- harmless while
+    // every frame was sent inside a critical section, fatal once sector data went out by
+    // DMA. UART0 is GPIO21/22, already brought up at 2 Mbaud by board_init(), and nothing
+    // in any core reads console text from UART1: iosys_bl616.v discards every byte that
+    // is not part of a 0xAA frame.
+    {
+        struct bflb_device_s *uart0 = bflb_device_get_by_name("uart0");
+        if (uart0) bflb_uart_set_console(uart0);
+    }
+    fpga_tx_lock_init();
 
     // set JTAG pins to high-Z
     // interrupts masked, SWGPIO mode, output off, input off, schmitt ON

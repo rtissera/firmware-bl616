@@ -130,111 +130,74 @@ extern "C" size_t chd_dbg_largest_free_block(void) {
 // Real state for the currently-mounted disc. One disc at a time, same real assumption
 // every other core loader in this firmware makes (fcore is a single global FIL too).
 // ---------------------------------------------------------------------------
-// DMA SECTOR TRANSMIT (2026-09-16).
+// DMA SECTOR TRANSMIT, second design (2026-09-17).
 //
-// pcecd_send_sector_chunk() used to be a blocking, polled write of 2352 bytes inside
-// taskENTER_CRITICAL(): the CPU spun for the full 11.76 ms of wire time per sector,
-// with interrupts disabled, ~88% of the time during CD-DA playback. That spinning is
-// exactly where the ~62 ms libchdr hunk decode has to go if CD-DA is ever to keep up.
+// Why DMA at all: the blocking write spins the CPU for the full 11.76 ms of wire time per
+// 2352-byte sector. libchdr needs ~62 ms per 8-sector hunk, so decode THEN send is
+// 62 + 94 = 156 ms to deliver 107 ms of audio = 68% of realtime -- measured 66-67%, the
+// scratchy audio. With the sending done by DMA the next hunk decodes WHILE the previous
+// sector goes out: ~113%.
 //
-// Measured before this change: 49.7 audio sectors/s against the 75/s CD-DA needs.
-// Per hunk of 8 sectors: decode 62 ms THEN send 94 ms = 156 ms to deliver 107 ms of
-// audio = 68% of realtime, which matches the measurement. Overlapping the decode with
-// the sending takes it to max(62, 94) = 94 ms = 113%.
+// What the first design (2026-09-16) got wrong. Every disc stalled at a byte-identical
+// point -- Bonk III at 163 requests, Rondo at 202 -- at the first DMA transfer ever
+// attempted. Ruled out by measurement: the FPGA side (three builds, identical stalls), RX
+// starvation (interrupt RX took the FIFO high-water from 23-31 to 9-12 with no drops, and
+// it still stalled), and cache coherency (the staging buffer sits in ram_nocache). What
+// it had lost was EXCLUSION: the old taskENTER_CRITICAL() around each blocking write was
+// the only thing stopping other writers landing inside a frame, and a DMA transfer runs
+// with interrupts enabled. The drain hook added to compensate covered some writers and
+// not others, and it was itself deadlocking when reached from a critical section.
 //
-// Why DMA and not a second task: decode-ahead on another task would mean two chd_read()
-// calls against one chd_file, which shares chd->compressed, the codec state and the
-// cached-hunk bookkeeping. libchdr is not re-entrant on a handle and locking it would
-// just serialise the two again. With DMA there is still exactly ONE chd_read in flight
-// at any instant -- the overlap is CPU against the DMA engine, so libchdr is never
-// re-entered and the question does not arise.
+// This design makes exclusion explicit instead (see the UART1 token in utils.cpp):
+//   - take the token        -- waits for the previous DMA transfer, or any other frame
+//   - stage one frame, start DMA, return with the token STILL HELD
+//   - DMA completion ISR    -- releases the token
+// So there is exactly one transfer in flight, no ring, no drain hook, no critical section
+// spanning a transfer, and exactly one chd_read() in flight at any time -- libchdr is
+// never re-entered, which is why this is not a decode-ahead task.
 //
-// The ring exists because one in-flight transfer only covers 11.76 ms of the 62 ms
-// decode (74% of realtime). Hiding the whole decode needs ~5.3 sectors queued, which is
-// why this pairs with cd_bridge's multi-sector audio prefetch and the deeper CDDA FIFO.
+// Every step is counted, and every wait is bounded, so the next hardware run MEASURES
+// whether DMA works instead of letting it be inferred from a hang:
+//   dma=started/done  -- a gap means completion interrupts are not arriving
+//   dmams=last/max    -- ~12 ms = paced out by the UART; 0 ms = never actually sent
+//   dmato             -- token waits that timed out (DMA disabled after the first)
+//   lkto              -- timeouts on the ordinary frame writers
 //
-// Buffers are ATTR_NOCACHE_NOINIT_RAM_SECTION: the DMA engine does not snoop the D-cache,
-// so a cached staging buffer would transmit stale bytes.
-#define PCECD_TXQ_SLOTS     6
-// 0xAA + len16 + cmd + chunk_idx + 1176 payload, twice (the sector is sent as two
-// 1176-byte chunks, the second tagged 0xFF as the final-chunk sentinel).
+// Buffers are ATTR_NOCACHE_NOINIT_RAM_SECTION: the DMA engine does not snoop the D-cache.
+#define PCECD_TX_DMA_ENABLE 1
 #define PCECD_TX_CHUNK      (PCECD_AUDIO_BYTES / 2)
-#define PCECD_TX_FRAME      (5 + PCECD_TX_CHUNK)
-#define PCECD_TXQ_SLOT_SIZE (2 * PCECD_TX_FRAME)
+#define PCECD_TX_FRAME      (5 + PCECD_TX_CHUNK)       // 0xAA len16 cmd chunk_idx + payload
+#define PCECD_TX_STAGE_SIZE (2 * PCECD_TX_FRAME)
+// Generous against the ~12 ms a transfer should take, so only a genuinely lost
+// completion ever reaches it.
+#define PCECD_TX_DMA_WAIT_MS 250
 
-static ATTR_NOCACHE_NOINIT_RAM_SECTION uint8_t pcecd_txq[PCECD_TXQ_SLOTS][PCECD_TXQ_SLOT_SIZE];
-static uint16_t pcecd_txq_len[PCECD_TXQ_SLOTS];
-static volatile uint8_t pcecd_txq_head = 0;   // next slot to fill
-static volatile uint8_t pcecd_txq_tail = 0;   // slot currently being sent
-static volatile uint8_t pcecd_txq_count = 0;
+static ATTR_NOCACHE_NOINIT_RAM_SECTION uint8_t pcecd_tx_stage[PCECD_TX_STAGE_SIZE];
 static struct bflb_device_s *pcecd_tx_dma = NULL;
 static struct bflb_dma_channel_lli_pool_s pcecd_tx_llipool[4];
-
-// Start the tail slot if the engine is idle and something is queued. Safe to call from
-// task or ISR context; the caller owns the critical section.
-static void pcecd_tx_kick(void)
-{
-    if (pcecd_txq_count == 0 || pcecd_tx_dma == NULL) return;
-    if (bflb_dma_channel_isbusy(pcecd_tx_dma)) return;
-    struct bflb_dma_channel_lli_transfer_s tr[1];
-    tr[0].src_addr = (uint32_t)pcecd_txq[pcecd_txq_tail];
-    tr[0].dst_addr = (uint32_t)DMA_ADDR_UART1_TDR;
-    tr[0].nbytes   = pcecd_txq_len[pcecd_txq_tail];
-    bflb_dma_channel_lli_reload(pcecd_tx_dma, pcecd_tx_llipool, 4, tr, 1);
-    bflb_dma_channel_start(pcecd_tx_dma);
-}
+static volatile uint8_t  pcecd_dma_inflight = 0;
+static volatile TickType_t pcecd_dma_t0 = 0;
+volatile uint32_t pcecd_dma_started = 0;
+volatile uint32_t pcecd_dma_done = 0;
+volatile uint32_t pcecd_dma_timeouts = 0;
+volatile uint32_t pcecd_dma_last_ms = 0;
+volatile uint32_t pcecd_dma_max_ms = 0;
 
 static void pcecd_tx_dma_isr(void *arg)
 {
     (void)arg;
-    if (pcecd_txq_count > 0) {
-        pcecd_txq_tail = (uint8_t)((pcecd_txq_tail + 1) % PCECD_TXQ_SLOTS);
-        pcecd_txq_count--;
-    }
-    pcecd_tx_kick();
+    if (!pcecd_dma_inflight) return;          // spurious, or already recovered by timeout
+    pcecd_dma_inflight = 0;
+    uint32_t ms = (uint32_t)((xTaskGetTickCountFromISR() - pcecd_dma_t0) * portTICK_PERIOD_MS);
+    pcecd_dma_last_ms = ms;
+    if (ms > pcecd_dma_max_ms) pcecd_dma_max_ms = ms;
+    pcecd_dma_done++;
+    fpga_tx_unlock_from_isr();                // the transfer owned the token; release it
 }
-
-// Blocks until every queued sector has actually left the wire. Any OTHER writer to
-// UART1 (TOC frames, mount, overlay text -- all still blocking putchar) must call this
-// first, or its bytes interleave with an in-flight DMA and corrupt both frames.
-void pcecd_tx_drain(void)
-{
-    if (pcecd_tx_dma == NULL) return;
-    // MUST be called with interrupts enabled and not from a critical section: what
-    // releases this loop is the DMA completion ISR. Waiting on it with interrupts off
-    // can never finish. xTaskGetSchedulerState() catches the scheduler-suspended case;
-    // the critical-section case is prevented by construction -- no caller invokes this
-    // between taskENTER_CRITICAL() and taskEXIT_CRITICAL(), and fpga_tx_header()
-    // deliberately does NOT call the hook for that reason.
-    if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return;
-    while (pcecd_txq_count > 0 || bflb_dma_channel_isbusy(pcecd_tx_dma))
-        vTaskDelay(1);
-}
-
-// BISECT SWITCH (2026-09-16). 0 disables DMA sector transmit and falls back to the
-// blocking write, which is the path that booted games and played (scratchy) audio.
-//
-// Why it is off: after the DMA landed, every disc stalled at a byte-identical point --
-// Bonk III at 163 requests, Rondo at 202 -- with the MCU alive and idle on an empty
-// queue, the FPGA no longer asking, and the SCSI bus parked in COMMAND phase. Three
-// different FPGA builds (6-deep prefetch, 1-deep, and a control bit-identical to
-// known-good) produced exactly the same numbers, which exonerated the FPGA side.
-// Interrupt-driven RX then brought the hardware FIFO high-water from 23-31 of 32 down
-// to 9-12 with zero ring drops, and it STILL stalled -- so RX starvation is not the
-// cause either. The DMA staging buffer was verified to live at 0x22fc1000, inside
-// ram_nocache, so it is not a cache-coherency fault.
-//
-// That leaves the DMA transmit itself, at the first transfer it ever attempts (both
-// discs stall exactly where CDDA begins). Rather than guess a fifth time, this bisects:
-// with it off the board should return to booting and playing scratchily, confirming the
-// DMA is the sole remaining variable. When it goes back on it needs a completion
-// counter in the cdprog line first, so "did the DMA ISR ever fire" is measured instead
-// of inferred.
-#define PCECD_TX_DMA_ENABLE 0
 
 void pcecd_tx_dma_init(void)
 {
-    if (!PCECD_TX_DMA_ENABLE) return;   // pcecd_tx_dma stays NULL -> blocking send
+    if (!PCECD_TX_DMA_ENABLE) return;         // pcecd_tx_dma stays NULL -> blocking send
     struct bflb_dma_channel_config_s cfg;
     cfg.direction       = DMA_MEMORY_TO_PERIPH;
     cfg.src_req         = DMA_REQUEST_NONE;
@@ -245,42 +208,56 @@ void pcecd_tx_dma_init(void)
     cfg.dst_burst_count = DMA_BURST_INCR1;
     cfg.src_width       = DMA_DATA_WIDTH_8BIT;
     cfg.dst_width       = DMA_DATA_WIDTH_8BIT;
-    pcecd_tx_dma = bflb_device_get_by_name("dma0_ch0");
-    if (pcecd_tx_dma == NULL) return;          // fall back to the blocking path
-    bflb_dma_channel_init(pcecd_tx_dma, &cfg);
-    bflb_dma_channel_irq_attach(pcecd_tx_dma, pcecd_tx_dma_isr, NULL);
+    struct bflb_device_s *dev = bflb_device_get_by_name("dma0_ch0");
+    if (dev == NULL) return;
+    bflb_dma_channel_init(dev, &cfg);
+    bflb_dma_channel_irq_attach(dev, pcecd_tx_dma_isr, NULL);
     bflb_uart_link_txdma(uart1_dev, true);
-    fpga_tx_drain_hook = pcecd_tx_drain;
+    pcecd_tx_dma = dev;
 }
 
-// Stage one whole raw CD-DA sector as two framed chunks and hand it to the DMA ring.
-// Returns without waiting for the wire: that is the entire point.
+static void pcecd_send_sector_blocking(const uint8_t *swapped);
+
+// Send one whole raw CD-DA sector (already byte-swapped). Returns as soon as the transfer
+// is started; the token stays held until the completion ISR releases it.
 static void pcecd_send_sector_dma(const uint8_t *swapped)
 {
-    // Ring full: the FPGA is asking faster than the wire can carry, so block. This is
-    // back-pressure, not an error -- it cannot be dropped without a gap in the music.
-    while (pcecd_txq_count >= PCECD_TXQ_SLOTS)
-        vTaskDelay(1);
+    if (!fpga_tx_lock_timed(PCECD_TX_DMA_WAIT_MS)) {
+        // The previous transfer never reported completion (or another writer is stuck).
+        // Stop the channel, give DMA up for the rest of the session, and carry on with the
+        // blocking path so the game keeps running. The counters say what happened.
+        pcecd_dma_timeouts++;
+        if (pcecd_tx_dma) bflb_dma_channel_stop(pcecd_tx_dma);
+        pcecd_dma_inflight = 0;
+        pcecd_tx_dma = NULL;
+        fpga_tx_unlock();                     // re-arm the token we could not obtain
+        pcecd_send_sector_blocking(swapped);
+        return;
+    }
 
-    uint8_t *d = pcecd_txq[pcecd_txq_head];
+    uint8_t *d = pcecd_tx_stage;
     uint16_t n = 0;
     for (int c = 0; c < 2; c++) {
-        uint16_t len = PCECD_TX_CHUNK + 2;     // chunk_idx + payload, as the old header did
+        uint16_t len = PCECD_TX_CHUNK + 2;    // chunk_idx + payload, as fpga_tx_header's len
         d[n++] = 0xAA;
         d[n++] = (uint8_t)(len >> 8);
         d[n++] = (uint8_t)(len & 0xFF);
         d[n++] = 0x10;
-        d[n++] = (c == 0) ? 0x00 : 0xFF;       // 0xFF = final-chunk sentinel
+        d[n++] = (c == 0) ? 0x00 : 0xFF;      // 0xFF = final-chunk sentinel
         memcpy(&d[n], swapped + c * PCECD_TX_CHUNK, PCECD_TX_CHUNK);
         n += PCECD_TX_CHUNK;
     }
-    pcecd_txq_len[pcecd_txq_head] = n;
 
-    taskENTER_CRITICAL();
-    pcecd_txq_head = (uint8_t)((pcecd_txq_head + 1) % PCECD_TXQ_SLOTS);
-    pcecd_txq_count++;
-    pcecd_tx_kick();
-    taskEXIT_CRITICAL();
+    struct bflb_dma_channel_lli_transfer_s tr[1];
+    tr[0].src_addr = (uint32_t)pcecd_tx_stage;
+    tr[0].dst_addr = (uint32_t)DMA_ADDR_UART1_TDR;
+    tr[0].nbytes   = n;
+    pcecd_dma_t0 = xTaskGetTickCount();
+    pcecd_dma_inflight = 1;
+    pcecd_dma_started++;
+    bflb_dma_channel_lli_reload(pcecd_tx_dma, pcecd_tx_llipool, 4, tr, 1);
+    bflb_dma_channel_start(pcecd_tx_dma);
+    // Token intentionally NOT released here.
 }
 
 // Byte-swapped CD-DA scratch, one raw sector. Static rather than a 2352-byte stack
@@ -322,11 +299,10 @@ static uint32_t pcecd_toc_sectors[101];   // playable sectors, for the track loo
 static int      pcecd_toc_num_tracks = 0;
 
 static void pcecd_send_mount(uint8_t mounted) {
-    if (fpga_tx_drain_hook) fpga_tx_drain_hook();   // outside the critical section, never inside
-    taskENTER_CRITICAL();
+    fpga_tx_lock();
     fpga_tx_header(0x0e, 2);
     fpga_tx_byte(mounted);
-    taskEXIT_CRITICAL();
+    fpga_tx_unlock();
 }
 
 // Real, generalized (2026-08-31g, was hardcoded to 1024 bytes/chunk for the Mode-1 data
@@ -338,27 +314,30 @@ static void pcecd_send_mount(uint8_t mounted) {
 // CD-DA path below uses the sentinel; the real 2048-byte data path keeps its original
 // chunk_idx values (0, 1) and is byte-for-byte unchanged on the wire.
 static void pcecd_send_sector_chunk(uint8_t chunk_idx, const uint8_t *data, uint16_t length) {
-    pcecd_tx_drain();   // never interleave a blocking write with an in-flight DMA
-    taskENTER_CRITICAL();
+    fpga_tx_lock();     // waits out an in-flight DMA sector; see utils.cpp
     fpga_tx_header(0x10, (int)length + 2);
     fpga_tx_byte(chunk_idx);
     for (uint16_t i = 0; i < length; i++)
         fpga_tx_byte(data[i]);
-    taskEXIT_CRITICAL();
+    fpga_tx_unlock();
+}
+
+static void pcecd_send_sector_blocking(const uint8_t *swapped) {
+    pcecd_send_sector_chunk(0, swapped, PCECD_AUDIO_BYTES / 2);
+    pcecd_send_sector_chunk(0xFF, swapped + PCECD_AUDIO_BYTES / 2, PCECD_AUDIO_BYTES / 2);
 }
 
 // Real, one TOC entry per call -- matches cd_bridge.vhd's own real TOC_WR/TOC_TRACK/
 // TOC_CONTROL/TOC_LBA one-write-per-track interface exactly.
 static void pcecd_send_toc_entry(uint8_t track, uint8_t control, uint32_t lba) {
-    pcecd_tx_drain();
-    taskENTER_CRITICAL();
+    fpga_tx_lock();
     fpga_tx_header(0x0f, 6);
     fpga_tx_byte(track);
     fpga_tx_byte(control);
     fpga_tx_byte((lba >> 16) & 0xff);
     fpga_tx_byte((lba >> 8) & 0xff);
     fpga_tx_byte(lba & 0xff);
-    taskEXIT_CRITICAL();
+    fpga_tx_unlock();
 }
 
 // Real, sends every real TOC entry captured by pcecd_read_toc() (including the real
@@ -629,12 +608,16 @@ static void pcecd_progress_tick(void) {
     if (pcecd_req_count < pcecd_next_report)
         return;
     pcecd_next_report *= 2;
-    char buf[112];
+    char buf[176];
     snprintf(buf, sizeof(buf),
-             "cdprog: reqs=%lu hunk_reads=%lu last_lba=%lu rxhi=%u ringhi=%u ringdrop=%lu tick=%lu",
+             "cdprog: reqs=%lu hunk_reads=%lu last_lba=%lu rxhi=%u ringhi=%u ringdrop=%lu "
+             "dma=%lu/%lu dmams=%lu/%lu dmato=%lu lkto=%lu tick=%lu",
              (unsigned long)pcecd_req_count, (unsigned long)pcecd_hunk_reads,
              (unsigned long)pcecd_last_lba, (unsigned)uart1_rx_hiwater,
              (unsigned)u1rx_ring_hiwater, (unsigned long)u1rx_ring_drops,
+             (unsigned long)pcecd_dma_started, (unsigned long)pcecd_dma_done,
+             (unsigned long)pcecd_dma_last_ms, (unsigned long)pcecd_dma_max_ms,
+             (unsigned long)pcecd_dma_timeouts, (unsigned long)fpga_tx_lock_timeouts,
              (unsigned long)xTaskGetTickCount());
     file_log(buf);
 }
@@ -843,13 +826,10 @@ void pcecd_serve_audio_sector(uint32_t lba) {
     // then free to decode the next hunk while this one is still going out on the wire --
     // that overlap is the fix for the CD-DA underrun. Falls back to the old blocking
     // path if the DMA channel was not available at init.
-    if (pcecd_tx_dma != NULL) {
+    if (pcecd_tx_dma != NULL)
         pcecd_send_sector_dma(pcecd_audio_buf);
-    } else {
-        pcecd_send_sector_chunk(0, pcecd_audio_buf, PCECD_AUDIO_BYTES / 2);
-        pcecd_send_sector_chunk(0xFF, pcecd_audio_buf + PCECD_AUDIO_BYTES / 2,
-                                PCECD_AUDIO_BYTES / 2);
-    }
+    else
+        pcecd_send_sector_blocking(pcecd_audio_buf);
     pcecd_ring_mark(PCECD_RG_SENT, 0xFFFFFFFF, 0);
 }
 
