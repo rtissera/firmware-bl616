@@ -95,16 +95,43 @@ extern "C" size_t chd_dbg_largest_free_block(void) {
 #define PCECD_USER_DATA_BYTES    2048
 
 // Real raw CD-DA (audio-track) sector: unlike Mode-1 data tracks, an audio track's raw
-// unit has NO sync/header/ECC structure at all -- all 2352 bytes are direct 16-bit-LE
-// stereo PCM (588 samples), starting at byte 0 of the raw unit (no offset to skip),
-// confirmed against libchdr's own real per-track metadata (AUDIO vs MODE1 `type`) and
-// every real .chd this session tested. Matches cd_bridge.vhd's real CDDA_FIFO byte
-// order exactly (see that file's own port comment): L-lsb, L-msb, R-lsb, R-msb per
-// sample, sent in the same byte order the raw unit already stores them in.
+// unit has NO sync/header/ECC structure at all -- all 2352 bytes are 16-bit stereo PCM
+// (588 samples), starting at byte 0 of the raw unit (no offset to skip), confirmed
+// against libchdr's own real per-track metadata (AUDIO vs MODE1 `type`) and every real
+// .chd tested.
+//
+// BYTE ORDER, corrected 2026-09-16 -- this was the garbled-CD-audio bug. A CHD stores
+// CD-DA samples BIG-ENDIAN, and the raw hunk bytes libchdr hands back are in that order.
+// cd.vhd's CDDA_FIFO wants LITTLE-endian: it packs the wire bytes as
+// `FIFO_D(7:0) <= CD_DATA` then `(15:8)`, `(23:16)`, `(31:24)` (cd.vhd:824-828), i.e.
+// L-lsb, L-msb, R-lsb, R-msb. So every 16-bit sample must be byte-swapped on the way
+// out. Data tracks are NOT swapped, which is exactly why this hid for so long: the
+// byte-for-byte verification against beetle-pce-fast only ever covered MODE1 sectors.
+//
+// The reference implementation does the same swap, unconditionally, for every audio
+// track -- mednafen/cdrom/CDAccess_CHD.c sets `RawAudioMSBFirst = 1` for every track
+// whose type is AUDIO (line 183) and then:
+//     case DI_FORMAT_AUDIO:
+//        CDAccess_CHD_Read_CHD_Hunk_RAW(self, buf, lba, ct);
+//        if (ct->RawAudioMSBFirst) Endian_A16_Swap(buf, 588 * 2);
+// while MODE1_RAW/MODE2_RAW fall through with no swap at all.
+//
+// Measured on dd2.chd track 3, 20 sectors at the loudest probed passage, comparing the
+// two interpretations by mean |sample-to-sample delta| against rms (music is strongly
+// correlated, noise is not):
+//     little-endian (correct)   mean|delta|   266   rms  4501   ratio 0.059
+//     big-endian   (what we sent) mean|delta| 21786  rms 19048   ratio 1.144
+// A ratio at or above 1 is white noise, and the wrong reading is also 4x louder -- which
+// is precisely what "garbled sound" sounded like.
 #define PCECD_AUDIO_BYTES        2352
 
 // Real state for the currently-mounted disc. One disc at a time, same real assumption
 // every other core loader in this firmware makes (fcore is a single global FIL too).
+// Byte-swapped CD-DA scratch, one raw sector. Static rather than a 2352-byte stack
+// object: this runs on the UART RX task, whose stack this firmware has already had to
+// raise once for the CD path.
+static uint8_t pcecd_audio_buf[PCECD_AUDIO_BYTES];
+
 static USB_NOCACHE_RAM_SECTION FIL f_chd;
 static chd_file *pcecd_chd = NULL;
 static const chd_header *pcecd_hdr = NULL;
@@ -634,8 +661,22 @@ void pcecd_serve_audio_sector(uint32_t lba) {
     }
 
     const uint8_t *raw = pcecd_hunk_buf + (uint32_t)sector_in_hunk * PCECD_RAW_UNIT_BYTES;
-    pcecd_send_sector_chunk(0, raw, PCECD_AUDIO_BYTES / 2);
-    pcecd_send_sector_chunk(0xFF, raw + PCECD_AUDIO_BYTES / 2, PCECD_AUDIO_BYTES / 2);
+
+    // Big-endian -> little-endian, 16 bits at a time. See PCECD_AUDIO_BYTES' comment.
+    //
+    // Swapped into a separate buffer rather than in place: pcecd_hunk_buf is the CACHED
+    // hunk, and the same sector can legitimately be requested twice (a re-read, or a
+    // seek landing back in the same hunk). An in-place swap would double-swap on the
+    // second request and hand back the original garbage, which would look exactly like
+    // an intermittent version of the bug this fixes.
+    for (uint32_t i = 0; i < PCECD_AUDIO_BYTES; i += 2) {
+        pcecd_audio_buf[i]     = raw[i + 1];
+        pcecd_audio_buf[i + 1] = raw[i];
+    }
+
+    pcecd_send_sector_chunk(0, pcecd_audio_buf, PCECD_AUDIO_BYTES / 2);
+    pcecd_send_sector_chunk(0xFF, pcecd_audio_buf + PCECD_AUDIO_BYTES / 2,
+                            PCECD_AUDIO_BYTES / 2);
     pcecd_ring_mark(PCECD_RG_SENT, 0xFFFFFFFF, 0);
 }
 
