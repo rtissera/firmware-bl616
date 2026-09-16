@@ -211,8 +211,30 @@ void pcecd_tx_drain(void)
         vTaskDelay(1);
 }
 
+// BISECT SWITCH (2026-09-16). 0 disables DMA sector transmit and falls back to the
+// blocking write, which is the path that booted games and played (scratchy) audio.
+//
+// Why it is off: after the DMA landed, every disc stalled at a byte-identical point --
+// Bonk III at 163 requests, Rondo at 202 -- with the MCU alive and idle on an empty
+// queue, the FPGA no longer asking, and the SCSI bus parked in COMMAND phase. Three
+// different FPGA builds (6-deep prefetch, 1-deep, and a control bit-identical to
+// known-good) produced exactly the same numbers, which exonerated the FPGA side.
+// Interrupt-driven RX then brought the hardware FIFO high-water from 23-31 of 32 down
+// to 9-12 with zero ring drops, and it STILL stalled -- so RX starvation is not the
+// cause either. The DMA staging buffer was verified to live at 0x22fc1000, inside
+// ram_nocache, so it is not a cache-coherency fault.
+//
+// That leaves the DMA transmit itself, at the first transfer it ever attempts (both
+// discs stall exactly where CDDA begins). Rather than guess a fifth time, this bisects:
+// with it off the board should return to booting and playing scratchily, confirming the
+// DMA is the sole remaining variable. When it goes back on it needs a completion
+// counter in the cdprog line first, so "did the DMA ISR ever fire" is measured instead
+// of inferred.
+#define PCECD_TX_DMA_ENABLE 0
+
 void pcecd_tx_dma_init(void)
 {
+    if (!PCECD_TX_DMA_ENABLE) return;   // pcecd_tx_dma stays NULL -> blocking send
     struct bflb_dma_channel_config_s cfg;
     cfg.direction       = DMA_MEMORY_TO_PERIPH;
     cfg.src_req         = DMA_REQUEST_NONE;
