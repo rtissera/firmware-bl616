@@ -24,12 +24,19 @@ int loadpce(const char *fname) {
         wifi_log(buf);
     }
 
-    // check extension .pce
+    // check extension .pce or .sgx
+    //
+    // SuperGrafx ROMs are conventionally named .sgx and are otherwise the SAME HuCard image
+    // format -- header-less, optionally with a 512-byte copier header, loaded to the same
+    // place. The core decides what to do with them (the SGX generic in the bitstream), so the
+    // loader only has to accept the name. Without this every .sgx was refused with
+    // "Only .pce supported" and SuperGrafx titles could not be loaded at all.
     char *p = strcasestr(fname, ".pce");
+    if (p == NULL) p = strcasestr(fname, ".sgx");
     if (p == NULL) {
-        file_log("loadpce: not a .pce, abort");
-        wifi_log("loadpce: not a .pce, abort");
-        overlay_message("Only .pce supported", 1);
+        file_log("loadpce: not a .pce/.sgx, abort");
+        wifi_log("loadpce: not a .pce/.sgx, abort");
+        overlay_message("Only .pce and .sgx supported", 1);
         goto loadpce_end;
     }
 
@@ -132,8 +139,8 @@ int loadpce_dispatch(const char *fname) {
         wifi_log("loadpce_dispatch: .chd -> loadpcecd");
         return loadpcecd(fname);
     }
-    file_log("loadpce_dispatch: not .chd -> loadpce path");
-    wifi_log("loadpce_dispatch: not .chd -> loadpce path");
+    file_log("loadpce_dispatch: not .chd -> loadpce path (.pce/.sgx)");
+    wifi_log("loadpce_dispatch: not .chd -> loadpce path (.pce/.sgx)");
     // Drop any disc left mounted from a prior .chd load -- but only if something
     // actually is mounted. pcecd_unload() always sends a mount(0) frame to the FPGA,
     // which is fine once the CD core is already listening (its 3 existing callers)

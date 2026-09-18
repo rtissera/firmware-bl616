@@ -266,10 +266,11 @@ static int menu_loadrom(const char *dir) {
     // PC Engine's unified entry (id 8) owns both .pce (pce/) and .chd (pcenginecd/) --
     // extension is the real discriminator, checked first so a .chd under pcenginecd/
     // doesn't need to match a rom_dir prefix that entry no longer solely owns.
-    if (strcasestr(path.c_str(), ".pce") || strcasestr(path.c_str(), ".chd")) {
+    if (strcasestr(path.c_str(), ".pce") || strcasestr(path.c_str(), ".chd") ||
+        strcasestr(path.c_str(), ".sgx")) {
         core = find_core_by_id(8);
         char buf[160];
-        snprintf(buf, sizeof(buf), "menu_loadrom: .pce/.chd extension match, path=%s core=%p", path.c_str(), (void*)core);
+        snprintf(buf, sizeof(buf), "menu_loadrom: .pce/.sgx/.chd extension match, path=%s core=%p", path.c_str(), (void*)core);
         file_log(buf);
         wifi_log(buf);
     }
