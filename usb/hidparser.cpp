@@ -399,6 +399,38 @@ bool parse_report_descriptor(const uint8_t *rep, uint16_t rep_size, hid_report_t
 					// we only support mice, keyboards and joysticks
 					hidp_extreme_debugf("USAGE(%lu/0x%lx)", value, value);
 
+					// HID 1.11 section 6.2.2.8: a USAGE item may be 1, 2 or 4 bytes. The
+					// 4-byte form is an EXTENDED usage carrying its own usage page in the
+					// high 16 bits (page << 16 | id) instead of inheriting USAGE_PAGE.
+					// Every comparison below expects the short form, so an extended usage
+					// fell through to "UNSUPPORTED USAGE" and the axis was never found.
+					//
+					// Real device this breaks: the Nintendo Switch Pro Controller
+					// (057e:2009) declares its sticks as 0x10030/0x10031/0x10032/0x10035,
+					// i.e. page 1 (Generic Desktop) X/Y/Z/Rz in extended form. The parser
+					// found the buttons, never found X or Y, so JOYSTICK_COMPLETE was never
+					// satisfied and the whole report was rejected -- the pad enumerated and
+					// then did nothing. Verified on the real 203-byte descriptor.
+					//
+					// Fold an extended usage from the page we care about (1 = Generic
+					// Desktop, 9 = Button) back to its short form and carry on. A usage
+					// from any other page stays long and still reads as unsupported, which
+					// is correct.
+					if(value > 0xffff) {
+						uint16_t ext_page = value >> 16;
+						if(ext_page == USAGE_PAGE_GENERIC_DESKTOP || ext_page == USAGE_PAGE_BUTTON) {
+							hidp_debugf(" -> extended usage, page %u, id 0x%lx",
+							            (unsigned)ext_page, (unsigned long)(value & 0xffff));
+							// Apply the same page side effects the USAGE_PAGE item would
+							// have had, since an extended usage carries its page inline.
+							if(ext_page == USAGE_PAGE_BUTTON)
+								btns = 1;
+							else if(generic_desktop < 0)
+								generic_desktop = collection_depth;
+							value &= 0xffff;
+						}
+					}
+
 					if( !collection_depth && (value == USAGE_KEYBOARD)) {
 						// usage(keyboard) is always allowed
 						hidp_debugf(" -> Keyboard");
