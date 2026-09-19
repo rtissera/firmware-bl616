@@ -1,0 +1,106 @@
+name: build
+
+# TangCore BL616 companion firmware — CI build for all three Tang boards.
+#
+# Two external dependencies, both pinned by commit so a build is reproducible and an
+# upstream change can never silently alter the binary we ship:
+#
+#   toolchain  bouffalolab/toolchain_gcc_t-head_linux  — Xuantie-900 GCC 10.2.0 V2.6.1.
+#              Ubuntu's own riscv64-unknown-elf-gcc CANNOT build this: the SDK compiles
+#              with -mtune=e907 and stock GCC fails with "unknown cpu 'e907'".
+#   sdk        nand2mario/bouffalo_sdk — his FORK, not bouffalolab's, because it carries
+#              the C++ build fixes this firmware needs.
+#
+# The toolchain checkout is ~1.1 GB, so both are cached on their pinned SHAs.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  TOOLCHAIN_REPO: https://github.com/bouffalolab/toolchain_gcc_t-head_linux.git
+  TOOLCHAIN_SHA: c4afe91
+  SDK_REPO: https://github.com/nand2mario/bouffalo_sdk.git
+  SDK_SHA: 7f44f9e
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [console60k, primer25k, nano20k]
+
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: firmware
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          # The SDK drives system cmake with the "Unix Makefiles" generator and
+          # post-processes the image with a prebuilt bflb_fw_post_proc-ubuntu binary,
+          # so cmake + make + git is the whole list. No ninja, no Python.
+          sudo apt-get install -y --no-install-recommends cmake make git
+
+      - name: Cache T-Head toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchain_gcc_t-head_linux
+          key: thead-${{ env.TOOLCHAIN_SHA }}
+
+      - name: Fetch T-Head toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --filter=blob:none "$TOOLCHAIN_REPO" ~/toolchain_gcc_t-head_linux
+          git -C ~/toolchain_gcc_t-head_linux checkout "$TOOLCHAIN_SHA"
+
+      - name: Cache Bouffalo SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/bouffalo_sdk
+          key: blsdk-${{ env.SDK_SHA }}
+
+      - name: Fetch Bouffalo SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          git clone --filter=blob:none "$SDK_REPO" ~/bouffalo_sdk
+          git -C ~/bouffalo_sdk checkout "$SDK_SHA"
+
+      - name: Verify toolchain is the T-Head one
+        run: |
+          export PATH="$HOME/toolchain_gcc_t-head_linux/bin:$PATH"
+          riscv64-unknown-elf-gcc --version
+          # Guard against silently picking up a stock GCC, which would fail later and
+          # much less legibly (see the -mtune=e907 note above).
+          riscv64-unknown-elf-gcc --version | grep -qi xuantie
+
+      - name: Build ${{ matrix.board }}
+        working-directory: firmware
+        run: |
+          export PATH="$HOME/toolchain_gcc_t-head_linux/bin:$PATH"
+          make TANG_BOARD=${{ matrix.board }} BL_SDK_BASE="$HOME/bouffalo_sdk" -j"$(nproc)"
+
+      - name: Check the artifact exists and report it
+        working-directory: firmware
+        run: |
+          test -f build/build_out/tangcore_bl616.bin
+          ls -la build/build_out/
+          echo "md5: $(md5sum build/build_out/tangcore_bl616.bin | cut -d' ' -f1)"
+          # Flash layout, for anyone reading the log: the Sipeed debugger firmware lives
+          # at 0x0 and this image is the SECONDARY BOOT app at 0x40000. It is NOT
+          # standalone-bootable — flashing it at 0x0 is rejected by the bootrom.
+          cp build/build_out/tangcore_bl616.bin tangcore_bl616_${{ matrix.board }}.bin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tangcore_bl616_${{ matrix.board }}
+          path: firmware/tangcore_bl616_${{ matrix.board }}.bin
+          if-no-files-found: error

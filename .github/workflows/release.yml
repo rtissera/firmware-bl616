@@ -1,0 +1,152 @@
+name: release
+
+# Tag-driven release. Builds all three boards from the tagged commit and publishes the
+# binaries as a GitHub Release, so a user can flash without a toolchain.
+#
+#   git tag -a v0.1.0 -m "..."  &&  git push private v0.1.0
+#
+# NOTE ON REMOTES: this repo's `origin` is nand2mario's upstream. Releases and tags go to
+# `private` (rtissera). Never push to origin.
+#
+# Releases are created as DRAFTS so nothing becomes visible until it is reviewed and
+# published by hand. Safe to run while the repository is still private.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and draft a release for'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TOOLCHAIN_REPO: https://github.com/bouffalolab/toolchain_gcc_t-head_linux.git
+  TOOLCHAIN_SHA: c4afe91
+  SDK_REPO: https://github.com/nand2mario/bouffalo_sdk.git
+  SDK_SHA: 7f44f9e
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        board: [console60k, primer25k, nano20k]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: firmware
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake make git
+
+      - name: Cache T-Head toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchain_gcc_t-head_linux
+          key: thead-${{ env.TOOLCHAIN_SHA }}
+
+      - name: Fetch T-Head toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          git clone --filter=blob:none "$TOOLCHAIN_REPO" ~/toolchain_gcc_t-head_linux
+          git -C ~/toolchain_gcc_t-head_linux checkout "$TOOLCHAIN_SHA"
+
+      - name: Cache Bouffalo SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/bouffalo_sdk
+          key: blsdk-${{ env.SDK_SHA }}
+
+      - name: Fetch Bouffalo SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          git clone --filter=blob:none "$SDK_REPO" ~/bouffalo_sdk
+          git -C ~/bouffalo_sdk checkout "$SDK_SHA"
+
+      - name: Build ${{ matrix.board }}
+        working-directory: firmware
+        run: |
+          export PATH="$HOME/toolchain_gcc_t-head_linux/bin:$PATH"
+          riscv64-unknown-elf-gcc --version | grep -qi xuantie
+          make TANG_BOARD=${{ matrix.board }} BL_SDK_BASE="$HOME/bouffalo_sdk" -j"$(nproc)"
+          test -f build/build_out/tangcore_bl616.bin
+          mkdir -p out
+          cp build/build_out/tangcore_bl616.bin out/tangcore_bl616_${{ matrix.board }}.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.board }}
+          path: firmware/out/*.bin
+          if-no-files-found: error
+
+  draft-release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          ls -la
+          md5sum *.bin | tee MD5SUMS.txt
+          sha256sum *.bin | tee SHA256SUMS.txt
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          TangCore BL616 companion firmware — PC Engine / TurboGrafx-16 support.
+
+          This is the MCU-side firmware. It reads ROMs and CD images from storage and
+          streams them to the FPGA core over UART. **It is required**: stock TangCore
+          firmware has no PC Engine support of any kind, so a bitstream alone loads
+          nothing.
+
+          ## Flashing
+
+          Write to flash address **`0x40000`**, never `0x0`. The Sipeed debugger firmware
+          lives at `0x0` and this image is the secondary-boot application — the bootrom
+          rejects it if flashed at `0x0`.
+
+          Enter ISP first (short the board's two ISP pads, *then* connect USB). Expect one
+          `BFLB IMG LOAD SHAKEHAND FAIL` before each operation and retry once; that is
+          normal on these boards and not a real failure. The ISP session is single-use —
+          after a completed operation, replug (pads still shorted) for a fresh one.
+
+          ## Boards
+
+          | binary | board | status |
+          |---|---|---|
+          | `tangcore_bl616_console60k.bin` | Tang Console 60K | **runs games** |
+          | `tangcore_bl616_primer25k.bin` | Tang Primer 25K | builds; board has no storage path for the MCU |
+          | `tangcore_bl616_nano20k.bin` | Tang Nano 20K | builds; board has no storage path for the MCU |
+
+          Only Console 60K can currently reach storage: it has two USB-C ports and a
+          microSD wired to the BL616. The other two boards have a single USB-C owned by the
+          debugger firmware, and no SD the MCU can drive. See the core repository's
+          `docs/STATUS.md`.
+          EOF
+          gh release create "$TAG" \
+            --draft \
+            --title "$TAG" \
+            --notes-file notes.md \
+            dist/*.bin dist/MD5SUMS.txt dist/SHA256SUMS.txt
