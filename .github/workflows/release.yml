@@ -42,6 +42,8 @@ jobs:
         with:
           path: firmware
           ref: ${{ github.event.inputs.tag || github.ref }}
+          # thirdparty/micro-flac is a submodule; without it CMake generate fails.
+          submodules: recursive
 
       - name: Install build dependencies
         run: |
@@ -73,6 +75,9 @@ jobs:
         run: |
           git clone --filter=blob:none "$SDK_REPO" ~/bouffalo_sdk
           git -C ~/bouffalo_sdk checkout "$SDK_SHA"
+          # The SDK carries CherryUSB as a submodule and this firmware builds with
+          # CONFIG_CHERRYUSB, so it has to be populated.
+          git -C ~/bouffalo_sdk submodule update --init --recursive
 
       - name: Build ${{ matrix.board }}
         working-directory: firmware

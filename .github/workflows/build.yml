@@ -38,6 +38,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: firmware
+          # thirdparty/micro-flac is a submodule (the FLAC backend libchdr selects for
+          # MCU targets). Without this the build dies at CMake generate with
+          # "Cannot find source file: thirdparty/micro-flac/src/flac_decoder.cpp".
+          submodules: recursive
 
       - name: Install build dependencies
         run: |
@@ -72,6 +76,9 @@ jobs:
         run: |
           git clone --filter=blob:none "$SDK_REPO" ~/bouffalo_sdk
           git -C ~/bouffalo_sdk checkout "$SDK_SHA"
+          # The SDK carries CherryUSB as a submodule and this firmware builds with
+          # CONFIG_CHERRYUSB, so it has to be populated.
+          git -C ~/bouffalo_sdk submodule update --init --recursive
 
       - name: Verify toolchain is the T-Head one
         run: |
