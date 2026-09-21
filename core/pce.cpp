@@ -6,6 +6,7 @@
 #include "cores.h"
 #include "overlay.h"
 #include "pcecd.h"
+#include "pcesave.h"
 #include "wifi_debug.h"
 
 extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
@@ -105,6 +106,10 @@ int loadpce(const char *fname) {
         wifi_log(buf);
     }
     overlay_status("Success");
+    // Backup RAM goes in while the core is still held in the loading state. For a CD game
+    // this runs for the syscard, but pcesave_set_game() was given the .chd, so the save is
+    // the disc's, not the BIOS's.
+    pcesave_restore();
     core_running = true;
 
     overlay(0);		// turn off OSD
@@ -128,6 +133,7 @@ loadpce_end:
 // extension is the real discriminator between a HuCard dump (.pce) and a CD image
 // (.chd), checked here before either loader's own file-open path runs.
 int loadpce_dispatch(const char *fname) {
+    pcesave_set_game(fname);    // the image the user picked -- names the save file
     {
         char buf[160];
         snprintf(buf, sizeof(buf), "loadpce_dispatch: fname=%s", fname);

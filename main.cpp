@@ -37,6 +37,7 @@ extern "C" {
 #include "overlay.h"
 #include "chd_fatfs.h"
 #include "core/pcecd.h"
+#include "core/pcesave.h"
 #include "init.h"
 #include "menu_manager.h"
 #include "wifi_debug.h"
@@ -396,6 +397,10 @@ static void send_hid_to_core(void) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     dprint("Stopped sending HID to core.");
+    // The in-game OSD is opening. Save now if the game wrote backup RAM (MiSTer's autosave
+    // point) -- and since the OSD is the only way to switch games, this is also what makes
+    // sure the old game is saved before another one loads.
+    pcesave_flush_now();
 }
 
 // // (R L X A RT LT DN UP START SELECT Y B)
@@ -626,8 +631,11 @@ void uart1_rx_irq_init(void)
 static void uart1_rx_task(void *pvParameters)
 {
     uint8_t buffer[5];
-    uint8_t pos = 0;
+    // uint16_t, not uint8_t: frame payloads run to 514 bytes (save-RAM blocks, floppy
+    // sectors). As uint8_t the floppy handler's `pos == 6+511` could never be reached.
+    uint16_t pos = 0;
     uint8_t type = 0;
+    uint16_t sv_blk = 0;
     uint16_t len = 0;
     uint8_t dbg_trace_tag = 0;
     uint8_t dbg_trace_buf[8] = {0};
@@ -771,6 +779,16 @@ static void uart1_rx_task(void *pvParameters)
                     pos = 0;
                 }
 
+            } else if (type == 0x0A) {           // save-RAM block: blk[15:0] + 512 bytes
+                uint16_t k = pos - 4;
+                if (k == 0)      sv_blk = (uint16_t)ch << 8;
+                else if (k == 1) sv_blk |= ch;
+                else             pcesave_rx_byte(sv_blk, k - 2, ch);
+                if (k == 2 + 511) { pcesave_rx_block_done(sv_blk); pos = 0; }
+                else pos++;
+            } else if (type == 0x0B) {           // the game wrote backup RAM (1 pad byte)
+                pcesave_rx_dirty();
+                pos = 0;
             } else {
                 pos = 0; // Reset if we get out of sync
             }
@@ -1043,6 +1061,7 @@ int main(void)
     uart1_rx_irq_init();
     xTaskCreate(uart1_rx_task, "uart1_rx_task", UART1_RX_TASK_STACK_SIZE, NULL, UART1_RX_TASK_PRIORITY, &uart1_rx_task_handle);
     cd_req_queue = xQueueCreate(16, sizeof(cd_req_t));
+    pcesave_init();                     // backup RAM <-> SD card, see core/pcesave.cpp
     xTaskCreate(cd_serve_task, "cd_serve_task", CD_SERVE_TASK_STACK_SIZE, NULL, CD_SERVE_TASK_PRIORITY, &cd_serve_task_handle);
     wifi_debug_start();     // real no-op unless built with WIFI_DEBUG=1
 
