@@ -310,7 +310,7 @@ static int neo_send_cfg(uint32_t cfg) {
 }
 
 // return 0 if successful
-// TEMP diagnostic, defined in main.cpp: dprint() goes out over the FPGA UART for a host
+// Diagnostic, defined in main.cpp: dprint() goes out over the FPGA UART for a host
 // capture tool, so nothing from this loader reached the SD card's debug.log -- which is the
 // only trace available when the core shows a black screen. file_log() writes there.
 extern void file_log(const char *msg);

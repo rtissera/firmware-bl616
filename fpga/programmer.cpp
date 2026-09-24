@@ -17,9 +17,9 @@
 #include "tc_utils.h"
 #include "overlay.h"
 
-extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
+extern void file_log(const char *msg);   // Diagnostic, defined in main.cpp
 
-void uart_dbg(const char *s);   // TEMP diagnostic, defined in main.cpp
+void uart_dbg(const char *s);   // Diagnostic, defined in main.cpp
 
 #define JTAG_MAX_CHAIN 8
 

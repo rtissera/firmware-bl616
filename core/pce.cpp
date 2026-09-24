@@ -9,7 +9,7 @@
 #include "pcesave.h"
 #include "wifi_debug.h"
 
-extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
+extern void file_log(const char *msg);   // Diagnostic, defined in main.cpp
 
 // Load a PC Engine / TurboGrafx-16 HuCard ROM (pcetang core)
 // return 0 if successful

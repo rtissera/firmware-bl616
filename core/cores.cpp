@@ -7,7 +7,7 @@
 #include "menu_manager.h"
 #include "overlay.h"
 
-extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
+extern void file_log(const char *msg);   // Diagnostic, defined in main.cpp
 
 // null-terminated list of core info
 std::vector<core_info> core_info_list;

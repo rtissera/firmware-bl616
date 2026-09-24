@@ -121,10 +121,10 @@ int __attribute__((weak)) putchar(int ch) {
     return ch;
 }
 
-// TEMP diagnostic: raw UART1 console (the SDK's own debug console, set via
+// Diagnostic: raw UART1 console (the SDK's own debug console, set via
 // bflb_uart_set_console in init_gpio_and_uart), independent of FPGA config
 // state, so we can see boot progress even when the FPGA never gets configured.
-// TEMP diagnostic: log to a real file on the mounted drive instead of the
+// Diagnostic: log to a real file on the mounted drive instead of the
 // screen -- overlay text is timing-sensitive and unreadable on a fast TV
 // redraw, especially once a game core's own video output takes over from
 // the menu core. Uses its own FIL handle so it never collides with fcore

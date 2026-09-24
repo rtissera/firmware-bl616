@@ -15,15 +15,15 @@
 #include "chd/chd_fatfs.h"
 #include "libchdr/chd.h"
 
-extern void file_log(const char *msg);   // TEMP diagnostic, defined in main.cpp
+extern void file_log(const char *msg);   // Diagnostic, defined in main.cpp
 
-// TEMP diagnostic (2026-09-10): largest single block newlib's heap will still hand out.
+// Diagnostic (2026-09-10): largest single block newlib's heap will still hand out.
 // Total free is the wrong question -- chd_open asks for a few sizeable contiguous blocks
 // (codec instances, then the hunk buffer), so fragmentation, not the total, is what would
 // bite. Probe downward and free immediately; costs nothing outside the log lines.
 extern "C" void chd_dbg_log(const char *m) { file_log(m); }
 
-// TEMP diagnostic (2026-09-10). The SDK's weak hooks are `printf(); while(1);` on UART0,
+// Diagnostic (2026-09-10). The SDK's weak hooks are `printf(); while(1);` on UART0,
 // which nothing is capturing here -- so both failures present as a silent hang with no
 // reset, which is exactly the symptom being chased. Override them to leave a durable
 // mark on the SD card first. Writing to FatFs from the overflow hook is not strictly
@@ -393,7 +393,7 @@ void pcecd_unload(void) {
     pcecd_send_mount(0);
 }
 
-// TEMP instrumentation (2026-09-10). The syscard boots and shows "JUST A MOMENT...",
+// Instrumentation (2026-09-10). The syscard boots and shows "JUST A MOMENT...",
 // then sits there. The hot path below only logs on ERROR, so "no errors in the log" and
 // "no sector request ever arrived" are indistinguishable -- which is exactly the gap that
 // made the earlier hang take four rounds. These counters make the difference visible:
