@@ -71,10 +71,11 @@ void init_core_list() {
         // `make TANG_BOARD=console60k SHOW_NEOGEO=1` to show the entry.
         7,
 #endif
-#if defined(TANG_PRIMER25K) || defined(TANG_CONSOLE60K) || defined(TANG_NANO20K)
-        // pcetang: gw_sh-verified on these boards (see pcetang project
-        // memory pcetang_hw_bringup.md / status matrix) -- not enabled on
-        // other boards' menus until built and verified there too.
+#if defined(TANG_CONSOLE60K)
+        // pcetang: Console 60K only for now -- the only board that loads games.
+        // Primer 25K and Nano 20K bitstreams build, but those boards need an
+        // external MCU to load games (work in progress); add them back here once
+        // they run games on hardware.
         8,
 #endif
         -1, -2
