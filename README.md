@@ -8,6 +8,9 @@ TurboGrafx-16 core. The stock TangCore firmware cannot load it: pcetang needs th
 loader (CHD images, sector and CD-audio streaming over the UART), backup-RAM saves, and a
 PC Engine entry in the core menu. None of that is upstream yet.
 
+**Report problems on the [pcetang issue tracker](https://github.com/rtissera/pcetang/issues)**
+(issues are disabled here, to keep everything in one place).
+
 ## Status
 
 | | |

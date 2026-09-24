@@ -149,6 +149,17 @@ jobs:
           microSD wired to the BL616. The other two boards have a single USB-C owned by the
           debugger firmware, and no SD the MCU can drive. See the core repository's
           `docs/STATUS.md`.
+
+          ## Before you flash
+
+          - This firmware changes code every core uses (UART link, JTAG loading, USB
+            gamepads). It is tested on Console 60K with pcetang and mdtang; other cores
+            are untested. Back up your BL616 flash so you can return to stock.
+          - CD games must be `.chd` (convert `.cue` with `chdman createcd`).
+          - The Neo Geo loader is present but hidden from the menu (early preview).
+
+          Report problems on the pcetang issue tracker:
+          https://github.com/rtissera/pcetang/issues
           EOF
           gh release create "$TAG" \
             --draft \
