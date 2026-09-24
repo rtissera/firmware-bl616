@@ -64,8 +64,11 @@ void init_core_list() {
 #if defined(TANG_MEGA60K) || defined(TANG_MEGA138K) || defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K)
         3,4,5,6,
 #endif
-#if defined(TANG_CONSOLE60K)
+#if defined(TANG_CONSOLE60K) && defined(SHOW_NEOGEO)
         // Neo Geo (NeoTang) -- 60K-only until built/verified on the other boards.
+        // Hidden from the menu in release builds: the core is an early preview and
+        // is not released yet. The loader stays compiled in; build with
+        // `make TANG_BOARD=console60k SHOW_NEOGEO=1` to show the entry.
         7,
 #endif
 #if defined(TANG_PRIMER25K) || defined(TANG_CONSOLE60K) || defined(TANG_NANO20K)

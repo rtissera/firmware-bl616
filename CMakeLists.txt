@@ -16,6 +16,10 @@ if(USB_CDC_DEBUG)
 else()
     set(CONFIG_CHERRYUSB_HOST 1)
 endif()
+# Neo Geo (NeoTang) menu entry: hidden unless `make ... SHOW_NEOGEO=1` (early preview).
+if(SHOW_NEOGEO)
+    add_definitions(-DSHOW_NEOGEO=1)
+endif()
 set(CONFIG_BSP_SDH_SDCARD 1)
 set(CONFIG_FATFS 1)
 # FatFs-over-USB-host only makes sense with the host stack.
