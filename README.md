@@ -96,6 +96,12 @@ chdman createcd -i "Game (Japan).cue" -o "Game (Japan).chd"
 Tagged builds for all three boards are published by CI (`.github/workflows/release.yml`)
 with an `MD5SUMS.txt`.
 
+## How this was built
+
+The pcetang changes were developed with AI assistance (Claude), under my direction, and
+checked on real hardware before being claimed. The pcetang README describes how claims in
+these two repositories are verified.
+
 ---
 
 ## Original README (upstream)
