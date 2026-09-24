@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>

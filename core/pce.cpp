@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Loader structure follows nand2mario's core/*.cpp loaders in
+ * nand2mario/firmware-bl616 (Apache-2.0).
+ */
+
 #define _GNU_SOURCE
 #include <string.h>      // for strcasestr
 #include <stdio.h>

@@ -1,4 +1,10 @@
 /*
+ * Modified in the pcetang fork of nand2mario/firmware-bl616 (Apache-2.0).
+ * Modifications copyright (c) 2026 Romain Tisserand. The original header below
+ * (and its license) still applies to the original content.
+ */
+
+/*
  * FreeRTOS Kernel V10.2.1
  * Copyright (C) 2019 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
  *

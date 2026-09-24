@@ -1,4 +1,11 @@
 /*
+ * Modifications copyright (c) 2026 Romain Tisserand.
+ * Originally from nand2mario/firmware-bl616 (Apache-2.0); this file has been
+ * modified in the pcetang fork.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * GPIO JTAG programmer for Gowin GW5A and GW2A
  *
  * (c) 2025.2, nand2mario

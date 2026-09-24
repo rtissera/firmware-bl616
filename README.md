@@ -142,3 +142,7 @@ For the USB drive, You need an OTG dongle to turn the connector from a "device" 
 Acknowledgements
 * JTAG FPGA programming logic based on [openFPGALoader](https://github.com/trabucayre/openFPGALoader)
 * Gamepad support based on Till Harbaum's [FPGA-Companion](https://github.com/harbaum/FPGA-Companion)
+
+License
+* Apache-2.0, see [LICENSE](LICENSE). Original firmware (c) 2025 nand2mario; changes in this fork (c) 2026 Romain Tisserand.
+* Third-party code and its licenses: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)

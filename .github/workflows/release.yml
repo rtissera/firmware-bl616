@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Romain Tisserand
+# SPDX-License-Identifier: Apache-2.0
+
 name: release
 
 # Tag-driven release. Builds all three boards from the tagged commit and publishes the

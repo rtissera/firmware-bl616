@@ -1,4 +1,12 @@
 /*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * USB descriptor/setup code adapted from bouffalo_sdk
+ * examples/peripherals/usbdev/usbd_cdc_acm/cdc_acm_template.c (Apache-2.0).
+ */
+
+/*
  * USB CDC-ACM debug channel for tangcore (2026-09-09).
  *
  * WHY THIS EXISTS: hardware iteration on this board means swapping the SD card for every

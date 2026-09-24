@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // PC Engine backup RAM <-> SD card. See pcesave.cpp.
 #pragma once
 #include <stdint.h>

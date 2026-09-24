@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // PC Engine backup RAM survives a power-off.
 //
 // The FPGA exposes the core's 2 KB backup RAM through iosys_bl616's save-RAM channel:

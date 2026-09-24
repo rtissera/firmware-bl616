@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 // Real PC Engine CD-ROM (.chd) loader -- see pcetang_cd_scsi_plan.md (pcetang project

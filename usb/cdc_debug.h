@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef CDC_DEBUG_H
 #define CDC_DEBUG_H
 /* USB CDC-ACM debug channel. Only built under USB_CDC_DEBUG=1 -- see cdc_debug.c for

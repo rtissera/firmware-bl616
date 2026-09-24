@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "wifi_debug.h"
 
 #ifdef TANGCORE_WIFI_DEBUG

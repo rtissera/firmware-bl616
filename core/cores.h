@@ -1,3 +1,10 @@
+/*
+ * Modifications copyright (c) 2026 Romain Tisserand.
+ * Originally from nand2mario/firmware-bl616 (Apache-2.0); this file has been
+ * modified in the pcetang fork.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 #include <vector>

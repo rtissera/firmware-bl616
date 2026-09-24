@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Romain Tisserand
+# SPDX-License-Identifier: Apache-2.0
+
 name: build
 
 # TangCore BL616 companion firmware — CI build for all three Tang boards.

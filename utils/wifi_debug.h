@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Romain Tisserand
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 // Dev-only WiFi UDP debug logging -- only built when compiled with WIFI_DEBUG=1
