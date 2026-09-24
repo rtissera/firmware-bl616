@@ -80,6 +80,8 @@ chdman createcd -i "Game (Japan).cue" -o "Game (Japan).chd"
   errors that look like SDK bugs.
 - `make TANG_BOARD=console60k` (default), `primer25k` or `nano20k`.
 - `SHOW_NEOGEO=1` shows the Neo Geo entry (development only).
+- `DEBUG=1` is a debug build: it writes `debug.log` to the SD card root (useful for bug
+  reports). Release builds never write it.
 - `USB_CDC_DEBUG=1` turns the USB port into a debug serial link — **USB gamepads and USB
   drives stop working** in that build. Never ship it.
 - Builds are not byte-reproducible: the same source gives a different md5 each time.

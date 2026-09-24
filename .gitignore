@@ -1,3 +1,4 @@
 build/
 build_*/
 utils/wifi_creds.h
+bl616_fpga_partner_25kDock.bin

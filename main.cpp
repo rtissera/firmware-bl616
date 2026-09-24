@@ -179,6 +179,11 @@ void file_log(const char *msg) {
     // survives a hang that would eat the queued copy.
     dbg_uart_puts(msg);
 
+#ifndef TANGCORE_SD_LOG
+    // Release build: no debug.log on the SD card (a power cut mid-write can damage the
+    // FAT). `make DEBUG=1` turns the SD log back on for bug hunting.
+    return;
+#endif
     if (log_queue == NULL) {          // before the logger task exists, write inline
         file_log_sync(msg);
         return;

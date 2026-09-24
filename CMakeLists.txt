@@ -17,6 +17,10 @@ else()
     set(CONFIG_CHERRYUSB_HOST 1)
 endif()
 # Neo Geo (NeoTang) menu entry: hidden unless `make ... SHOW_NEOGEO=1` (early preview).
+# Debug build: debug.log on the SD card (`make ... DEBUG=1`). Release builds do not touch it.
+if(DEBUG)
+    add_definitions(-DTANGCORE_SD_LOG=1)
+endif()
 if(SHOW_NEOGEO)
     add_definitions(-DSHOW_NEOGEO=1)
 endif()

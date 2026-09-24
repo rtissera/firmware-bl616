@@ -7,6 +7,8 @@ WIFI_DEBUG ?= 0
 USB_CDC_DEBUG ?= 0
 # 1 = show the Neo Geo (NeoTang, early preview) entry in the core menu. Off in releases.
 SHOW_NEOGEO ?= 0
+# 1 = debug build: write debug.log to the SD card root. Off in releases.
+DEBUG ?= 0
 
 export BL_SDK_BASE
 
@@ -18,6 +20,7 @@ cmake_definition+=-DTANG_BOARD=$(TANG_BOARD)
 cmake_definition+=-DWIFI_DEBUG=$(WIFI_DEBUG)
 cmake_definition+=-DUSB_CDC_DEBUG=$(USB_CDC_DEBUG)
 cmake_definition+=-DSHOW_NEOGEO=$(SHOW_NEOGEO)
+cmake_definition+=-DDEBUG=$(DEBUG)
 
 include $(BL_SDK_BASE)/project.build
 
