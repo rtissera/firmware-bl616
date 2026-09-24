@@ -11,6 +11,8 @@ PC Engine entry in the core menu. None of that is upstream yet.
 **Report problems on the [pcetang issue tracker](https://github.com/rtissera/pcetang/issues)**
 (issues are disabled here, to keep everything in one place).
 
+Ko-fi and hardware donations are welcome to support this work: [ko-fi.com/rtissera](https://ko-fi.com/rtissera).
+
 ## Status
 
 | | |
