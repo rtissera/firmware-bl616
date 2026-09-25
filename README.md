@@ -20,7 +20,7 @@ Ko-fi and hardware donations are welcome to support this work: [ko-fi.com/rtisse
 | Board | **Tang Console 60K only.** The PC Engine menu entry is shown on Console 60K only. Primer 25K and Nano 20K build, but loading games there needs an external MCU (work in progress). |
 | PC Engine HuCards (`.pce`) | working |
 | SuperGrafx (`.sgx`) | working (some titles may still be imperfect) |
-| PC Engine CD (`.chd`) | working, including CD audio |
+| PC Engine CD (`.chd`) | working |
 | Arcade Card CD games | boot and play, not perfect yet (graphics glitches in some titles, one known lock-up) |
 | Backup-RAM saves | working, written to the SD card |
 | Neo Geo | loader present but **hidden** — early preview, the core is not released |
@@ -34,14 +34,6 @@ This firmware changes code that every core goes through, not only PC Engine file
 - **JTAG bitstream loading** (`fpga/programmer.cpp`): fixes from the Console 60K bring-up.
 - **USB gamepads** (`usb/hidparser.cpp`): 4-byte extended HID usages (Switch Pro and similar).
 - **Menu and main loop** (`main.cpp`).
-
-Tested on Console 60K with pcetang and mdtang. **Other cores are untested** with this
-firmware. Until these changes are merged upstream, if another core misbehaves, go back to
-the stock TangCore firmware for it.
-
-Known: the **smstang** core built from its public repository does not answer this
-firmware (nor current stock TangCore) — its `iosys_bl616.v` predates the length-prefixed
-command protocol. That is a problem in smstang's public source, not in this firmware.
 
 ## Before you flash
 
@@ -98,14 +90,15 @@ with an `MD5SUMS.txt`.
 
 ## How this was built
 
-The pcetang changes were developed with AI assistance (Claude), under my direction, and
+The pcetang changes are mostly using libchdr https://github.com/rtissera/libchdr integration
+and minor adjustement.
+Part of the work was developed with some AI assistance (Claude), under my direction, and
 checked on real hardware before being claimed. The pcetang README describes how claims in
 these two repositories are verified.
 
 ---
 
 ## Original README (upstream)
-
 
 This is TangCore firmware for the on-board BL616 of Tang Console.
 
