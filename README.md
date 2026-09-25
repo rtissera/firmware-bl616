@@ -35,6 +35,12 @@ This firmware changes code that every core goes through, not only PC Engine file
 - **USB gamepads** (`usb/hidparser.cpp`): 4-byte extended HID usages (Switch Pro and similar).
 - **Menu and main loop** (`main.cpp`).
 
+Tested on Console 60K with stock mdtang, nestang, snestang and gbatang: all fine. If another
+core misbehaves, open an issue and go back to stock TangCore firmware.
+
+smstang built from its public repo won't talk to any current firmware, stock included: its
+`iosys` is outdated.
+
 ## Before you flash
 
 - **Back up your BL616 flash first**, so you can return to stock. With the board in
@@ -90,8 +96,8 @@ with an `MD5SUMS.txt`.
 
 ## How this was built
 
-The pcetang changes are mostly using libchdr https://github.com/rtissera/libchdr integration
-and minor adjustement.
+The pcetang changes are mainly CD support through [libchdr](https://github.com/rtissera/libchdr),
+a reworked UART link to the FPGA, backup-RAM saves and a PC Engine menu entry.
 Part of the work was developed with some AI assistance (Claude), under my direction, and
 checked on real hardware before being claimed. The pcetang README describes how claims in
 these two repositories are verified.
