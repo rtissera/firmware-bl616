@@ -23,6 +23,7 @@ Ko-fi and hardware donations are welcome to support this work: [ko-fi.com/rtisse
 | PC Engine CD (`.chd`) | working |
 | Arcade Card CD games | boot and play, not perfect yet (graphics glitches in some titles, one known lock-up) |
 | Backup-RAM saves | working, written to the SD card |
+| OSD Options menu | working: lists the options the loaded core declares (pcetang: Multitap), saved per core on the SD card |
 | Neo Geo | loader present but **hidden** — early preview, the core is not released |
 
 ## It may break other cores
@@ -34,6 +35,8 @@ This firmware changes code that every core goes through, not only PC Engine file
 - **JTAG bitstream loading** (`fpga/programmer.cpp`): fixes from the Console 60K bring-up.
 - **USB gamepads** (`usb/hidparser.cpp`): 4-byte extended HID usages (Switch Pro and similar).
 - **Menu and main loop** (`main.cpp`).
+- **Options menu** (`ui/options_menu.cpp`): upstream's was an empty stub. Stock cores only
+  declare the OSD-key option, which this firmware does not use, so they show "no options".
 
 Tested on Console 60K with stock mdtang, nestang, snestang and gbatang: all fine. If another
 core misbehaves, open an issue and go back to stock TangCore firmware.
