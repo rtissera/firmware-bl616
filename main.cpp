@@ -47,6 +47,7 @@ extern "C" {
 #include "core/pcesave.h"
 #include "init.h"
 #include "menu_manager.h"
+#include "options_menu.h"
 #include "wifi_debug.h"
 
 extern "C" char *strcasestr(const char *haystack, const char *needle);
@@ -355,6 +356,9 @@ static int menu_loadrom(const char *dir) {
 
         // Attemp to load ROM
         if (active_core == core->id) {
+            // A freshly configured bitstream starts with core_config = 0: restore the
+            // options saved for this core before the game starts.
+            apply_saved_core_options(core->id);
             char buf[160];
             snprintf(buf, sizeof(buf), "menu_loadrom: calling load_rom fname=%s", fname.c_str());
             file_log(buf);
@@ -375,8 +379,14 @@ static int menu_loadrom(const char *dir) {
     return -1;
 }
 
+// Main menu "Options": the options of the game core currently loaded, if any. At boot
+// the menu runs on monitor.bin, which has none worth showing.
 static void menu_options(void) {
-    // to be implemented
+    menu_clear();
+    push_menu(std::unique_ptr<Menu>(create_options_menu(active_core > 0 ? active_core : -1)));
+    menu_current()->do_redraw();
+    menu_input_loop();
+    menu_clear();
 }
 
 // keep sending HID state to core until OSD is turned on
@@ -676,11 +686,20 @@ static void uart1_rx_task(void *pvParameters)
                     xSemaphoreGive(state_mutex);
                 }
                 pos = 0;
-            } else if (type == 2) {                 // config string
-                // skip for now
-                if (pos == len+2)
+            } else if (type == 2) {                 // config string, len-1 bytes
+                static char conf_rx[CORE_CONF_MAX];
+                uint16_t i = pos - 4;
+                if (i < CORE_CONF_MAX) conf_rx[i] = ch;
+                if (pos == len+2) {
+                    uint16_t n = len - 1 < CORE_CONF_MAX ? len - 1 : CORE_CONF_MAX;
+                    if (xSemaphoreTake(state_mutex, portMAX_DELAY) == pdTRUE) {
+                        memcpy(core_conf_str, conf_rx, n);
+                        core_conf_str[n] = 0;
+                        core_conf_len = n;
+                        xSemaphoreGive(state_mutex);
+                    }
                     pos = 0;
-                else
+                } else
                     pos++;
             } else if (type == 3) {                 // periodic joypad state
                 buffer[pos-4] = ch;
@@ -889,6 +908,7 @@ static void main_task(void *pvParameters)
                 // send_blank_packet();
                 active_core = get_core_id();            // 200ms timeout
                 overlay_status("core_id=%d", active_core);
+                if (active_core > 0) apply_saved_core_options(active_core);
                 if (active_core >= 0) redraw = true;    // redraw immediately if core is detected
             }
             // if (core < 0) continue;         // do not draw or process input if core is not ready
