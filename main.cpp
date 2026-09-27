@@ -323,7 +323,7 @@ static void uart1_rx_irq_init(void)
 static void uart1_rx_task(void *pvParameters)
 {
     uint8_t buffer[5];
-    uint8_t pos = 0;
+    uint16_t pos = 0;           // frames run to 518 bytes (floppy write)
     uint8_t type = 0;
     uint16_t len = 0;
     
