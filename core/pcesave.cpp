@@ -75,21 +75,21 @@ void pcesave_rx_dirty(void) {
 
 // ---- helpers ----
 static void sv_send_block(uint16_t blk, const uint8_t *data) {      // 0x11
-    taskENTER_CRITICAL();
+    fpga_tx_lock();
     fpga_tx_header(0x11, 1 + 2 + SV_BLK);
     fpga_tx_byte(blk >> 8); fpga_tx_byte(blk & 0xff);
     for (uint16_t i = 0; i < SV_BLK; i++) fpga_tx_byte(data[i]);
-    taskEXIT_CRITICAL();
+    fpga_tx_unlock();
 }
 
 // Read the whole backup RAM back from the FPGA into sv_rx. False on any missing block.
 static bool sv_dump(void) {
     for (uint16_t blk = 0; blk < SV_BLOCKS; blk++) {
         xSemaphoreTake(sv_blk_sem, 0);                              // drop a stale give
-        taskENTER_CRITICAL();
+        fpga_tx_lock();
         fpga_tx_header(0x12, 3);
         fpga_tx_byte(blk >> 8); fpga_tx_byte(blk & 0xff);
-        taskEXIT_CRITICAL();
+        fpga_tx_unlock();
         // 515 bytes at 2 Mbaud is ~2.6 ms; CD sector requests take priority in the FPGA,
         // so allow generously before calling it lost.
         if (xSemaphoreTake(sv_blk_sem, pdMS_TO_TICKS(1000)) != pdTRUE || sv_rx_blk != blk) {
