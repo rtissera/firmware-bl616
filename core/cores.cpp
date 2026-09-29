@@ -65,8 +65,9 @@ void init_core_list() {
         // rom_dir-prefix loop, see pcetang_cd_scsi_plan.md for the protocol this
         // shares with the CD path.
         {8, "PC Engine", "pce", "pcetang.bin", loadpce_dispatch, create_default_menu},
-        // Neo Geo CD -- the NeoTang CD bitstream (CD=1 build, CORE_ID 9), .chd discs.
-        {9, "Neo Geo CD", "neogeocd", "neotang_cd.bin", loadneogeocd, create_default_menu}
+        // Neo Geo CD -- EXPERIMENT: the unified NeoTang bitstream (UNIFIED=1 build, reports
+        // CORE_ID 7), .chd discs; core_hw_id() maps this entry onto it.
+        {9, "Neo Geo CD", "neogeocd", "neotang.bin", loadneogeocd, create_default_menu}
     };
 
     main_menu_config = {1,2,

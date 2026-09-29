@@ -319,10 +319,12 @@ static int menu_loadrom(const char *dir) {
 
     // user chose a ROM file
     active_core = get_core_id();
+    // EXPERIMENT: Neo Geo CD (9) runs on the unified Neo Geo bitstream, which reports 7
+    auto core_hw_id = [](int id) { return id == 9 ? 7 : id; };
 
     // load core if needed
     if (core != NULL) {
-        if (active_core != core->id) {      // active core is not what we need
+        if (active_core != core_hw_id(core->id)) {      // active core is not what we need
             string fname_core;
             if (find_core_for_board(fname_core, core->core_file)) {
                 // load core
@@ -351,7 +353,7 @@ static int menu_loadrom(const char *dir) {
                     send_blank_packet();
                     active_core = get_core_id();
                     last_seen = active_core;
-                    if (active_core == core->id)
+                    if (active_core == core_hw_id(core->id))
                         break;
                 }
                 overlay_cursor(0, 12);
@@ -366,7 +368,7 @@ static int menu_loadrom(const char *dir) {
         }
 
         // Attemp to load ROM
-        if (active_core == core->id) {
+        if (active_core == core_hw_id(core->id)) {
             // A freshly configured bitstream starts with core_config = 0: restore the
             // options saved for this core before the game starts.
             apply_saved_core_options(core->id);

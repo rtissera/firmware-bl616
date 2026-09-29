@@ -428,7 +428,7 @@ int loadneogeo(const char *fname) {
 
     // The config words go first: they select the cart's bank/protection hardware for the
     // whole session (and keep cd_en clear, i.e. arcade rather than Neo Geo CD).
-    neo_send_cfg(cart_cfg);
+    neo_send_cfg(cart_cfg & 0x7FFFFFFFu);   // bit 31 is the unified bitstream's CD switch
 
     // ---- M1.6: load the MVS system BIOS first (separate files on SD card) ----
     if (neo_load_bios("neogeo/sp-u2.sp1",  NEO_REG_SPROM, "SPROM (BIOS)", 1)) goto loadneogeo_end;
@@ -498,6 +498,7 @@ loadneogeo_close:
 #define NEOCD_CFG_CDZ        (1u << 2)            // status[2]: CD type, 0 = CD, 1 = CDZ
 #define NEOCD_CFG_SPEED(n)   ((uint32_t)(n) << 29) // status[30:29]: 0 = 1x, 1 = 2x
 #define NEOCD_CFG_MASK       (NEOCD_CFG_CDZ | NEOCD_CFG_SPEED(3))
+#define NEO_CART_CFG_CD      (1u << 31)           // cart config word: run the CD half (unified bitstream)
 
 static bool neo_file_exists(const std::string &sub) {
     FILINFO fno;
@@ -545,7 +546,7 @@ static int neocd_boot(void) {
 
     set_loading_state(1);
     core_running = false;
-    neo_send_cfg(0);                      // no cart hardware in the CD build
+    neo_send_cfg(NEO_CART_CFG_CD);        // no cart hardware; the CD half on (unified bitstream)
     int r = neo_load_bios(bios.c_str(), NEO_REG_SPROM, "SPROM (CD BIOS)", 1);
     if (!r) r = neo_load_bios(lo.c_str(), NEO_REG_LO, "LO", 1);
     if (!r && neocd_fname) {            // memory card from saves/neogeocd/<disc>.sav
