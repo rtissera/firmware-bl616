@@ -548,10 +548,8 @@ static int neocd_boot(void) {
     neo_send_cfg(0);                      // no cart hardware in the CD build
     int r = neo_load_bios(bios.c_str(), NEO_REG_SPROM, "SPROM (CD BIOS)", 1);
     if (!r) r = neo_load_bios(lo.c_str(), NEO_REG_LO, "LO", 1);
-    if (!r && neocd_fname) {            // memory card from saves/neogeocd/<disc>.sav
-        neosave_set_game(neocd_fname, true);
-        neosave_restore();
-    }
+    // TEST ONLY: no CD saves at all -- does the save path stop CD audio in game?
+    neosave_off();
     neo_log("neogeocd: BIOS load r=%d, starting core", r);
     set_loading_state(0);                 // starts the core
     if (r) return r;
