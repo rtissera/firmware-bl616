@@ -16,6 +16,7 @@
 // 72 KB twice would not fit the MCU. A save is two passes: dump and checksum every block;
 // only if one differs from what the file holds, dump again straight into the file.
 #include "neosave.h"
+#include "pcesave.h"
 #include "tc_utils.h"
 #include "ff.h"
 #include "FreeRTOS.h"
@@ -37,7 +38,6 @@ static char     ns_path[256], ns_dir[256], ns_root[256];
 static uint16_t ns_first = 0, ns_count = 0;      // the blocks this bitstream has
 static bool     ns_on = false;
 static SemaphoreHandle_t ns_mutex, ns_blk_sem;
-static TaskHandle_t ns_task;
 static volatile uint16_t ns_rx_blk = 0xFFFF;
 static volatile bool ns_dirty = false;           // set only by the FPGA's 0x0B notice
 
@@ -66,7 +66,8 @@ void neosave_rx_block_done(uint16_t blk) {
 }
 void neosave_rx_dirty(void) {
     ns_dirty = true;
-    if (ns_task) xTaskNotifyGive(ns_task);
+    TaskHandle_t t = pcesave_task_handle();                        // the shared save task
+    if (t) xTaskNotifyGive(t);
 }
 
 // ---- FPGA side ----
@@ -180,17 +181,8 @@ void neosave_flush_now(void) {
     xSemaphoreGive(ns_mutex);
 }
 
-static void neosave_task(void *) {
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);                    // the game wrote backup RAM
-        // Debounce: wait until it has been quiet for 2 s, so one save covers a whole burst.
-        while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000)) > 0) {}
-        neosave_flush_now();
-    }
-}
-
 void neosave_init(void) {
     ns_mutex = xSemaphoreCreateMutex();
     ns_blk_sem = xSemaphoreCreateBinary();
-    xTaskCreate(neosave_task, "neosave", 4096, NULL, 1, &ns_task);
+    // No task of its own: pcesave's task runs neosave_flush_now() while neosave_active().
 }

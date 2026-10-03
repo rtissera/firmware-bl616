@@ -191,9 +191,15 @@ static void pcesave_task(void *) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);                    // the game wrote backup RAM
         // Debounce: wait until it has been quiet for 2 s, so one save covers a whole burst.
         while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000)) > 0) {}
-        pcesave_flush_now();
+        // One task for both savers: a Neo Geo game or a PC Engine game owns the channel,
+        // never both, and a second 16 KB task starved libchdr's heap (Neo Geo CD: DISC I/O
+        // ERROR while loading).
+        if (neosave_active()) neosave_flush_now();
+        else                  pcesave_flush_now();
     }
 }
+
+TaskHandle_t pcesave_task_handle(void) { return sv_task; }
 
 void pcesave_init(void) {
     sv_mutex = xSemaphoreCreateMutex();
