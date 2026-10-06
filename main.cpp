@@ -455,7 +455,14 @@ static void send_hid_to_core(void) {
     // point) -- and since the OSD is the only way to switch games, this is also what makes
     // sure the old game is saved before another one loads.
     pcesave_flush_now();
-    neosave_flush_async();          // Neo Geo: on the save task, so the OSD opens at once
+    {   // Synchronous again: on the save task (neosave_flush_async) a cart save took ~153 s on
+        // hardware, ~1 s per block, cause not yet known. Timed here to size the OSD lag.
+        TickType_t t0 = xTaskGetTickCount();
+        neosave_flush_now();
+        char b[64]; snprintf(b, sizeof b, "osd: save on open took %lu ms",
+                             (unsigned long)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS));
+        file_log(b);
+    }
     {   // Stack peaks (unused bytes, lowest so far) and free heap, to size the tasks from data.
         auto unused = [](TaskHandle_t t) -> unsigned {
             return t ? (unsigned)(uxTaskGetStackHighWaterMark(t) * sizeof(StackType_t)) : 0; };
