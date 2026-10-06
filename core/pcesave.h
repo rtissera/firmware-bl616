@@ -16,3 +16,8 @@ void pcesave_flush_now(void);                   // save now if the game wrote si
 void pcesave_rx_byte(uint16_t blk, uint16_t off, uint8_t b);
 void pcesave_rx_block_done(uint16_t blk);
 void pcesave_rx_dirty(void);
+
+// The save task (shared with neosave, which has none of its own).
+#include "FreeRTOS.h"
+#include "task.h"
+TaskHandle_t pcesave_task_handle(void);

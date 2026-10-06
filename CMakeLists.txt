@@ -108,6 +108,13 @@ add_definitions(
     # putting libchdr_flac.c back in the glob below.
     -DCHDR_FLAC_BACKEND_MICROFLAC
     -DMICRO_FLAC_DISABLE_OGG
+    # zstd decoder option (deps/zstd, not a libchdr change): the 64 KB literal scratch buffer
+    # inside every ZSTD_DCtx shrinks to 1 KB. libchdr allocates its ~96 KB zstd context lazily,
+    # at the first cdzs hunk, from the one heap this BL616 (no PSRAM) shares with every task
+    # stack; with ~23 KB left after mount, a zstd CD (Metal Slug: cdzs + flac) ran out mid-game
+    # and serving stopped silently. Host check on that disc: all 35991 hunks byte-identical,
+    # peak heap 264 KB -> 199 KB, decode time unchanged.
+    -DZSTD_DECODER_INTERNAL_BUFFER=1024
 )
 
 find_package(bouffalo_sdk REQUIRED HINTS $ENV{BL_SDK_BASE})

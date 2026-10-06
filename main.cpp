@@ -45,6 +45,7 @@ extern "C" {
 #include "chd_fatfs.h"
 #include "core/pcecd.h"
 #include "core/pcesave.h"
+#include "core/neosave.h"
 #include "init.h"
 #include "menu_manager.h"
 #include "options_menu.h"
@@ -98,6 +99,7 @@ TaskHandle_t uart1_rx_task_handle;
 struct cd_req_t {
     uint32_t lba;
     bool     is_audio;
+    uint32_t t_us;       // arrival (mtimer): request -> audio send latency, see pcecd_req_t_us
 };
 static QueueHandle_t cd_req_queue;
 // Highest UART1 RX FIFO occupancy ever seen, reported in pcecd's cdprog line.
@@ -181,6 +183,7 @@ static volatile uint32_t log_drops = 0;
 static uint32_t log_drops_seen = 0;
 
 static void file_log_sync(const char *msg);
+static void fpga_link_baud_for(const char *bitstream);   // defined below menu_loadrom
 
 void file_log(const char *msg) {
     // Live copy first, on the caller's task: works before any drive is mounted and
@@ -270,6 +273,7 @@ static int menu_loadrom(const char *dir) {
     if (fname.find(string(drv) + "cores") == 0) {
         overlay_status("Core: %s", fname.c_str());
         fpga_program(fname.c_str());
+        fpga_link_baud_for(fname.c_str());
         _overlay_on = 1;                // turn on overlay after core is loaded
         return 0;       // return to main menu
     } 
@@ -280,7 +284,13 @@ static int menu_loadrom(const char *dir) {
     // PC Engine's unified entry (id 8) owns both .pce (pce/) and .chd (pcenginecd/) --
     // extension is the real discriminator, checked first so a .chd under pcenginecd/
     // doesn't need to match a rom_dir prefix that entry no longer solely owns.
-    if (strcasestr(path.c_str(), ".pce") || strcasestr(path.c_str(), ".chd") ||
+    // Neo Geo CD discs are .chd too: anything under neogeocd/ belongs to the Neo Geo CD
+    // entry (id 9, its own bitstream), checked before PC Engine claims every .chd.
+    if (path.find("neogeocd/") == 0) {
+        core = find_core_by_id(9);
+        file_log("menu_loadrom: neogeocd/ path -> Neo Geo CD");
+    }
+    else if (strcasestr(path.c_str(), ".pce") || strcasestr(path.c_str(), ".chd") ||
         strcasestr(path.c_str(), ".sgx")) {
         core = find_core_by_id(8);
         char buf[160];
@@ -324,6 +334,7 @@ static int menu_loadrom(const char *dir) {
                     file_log(buf);
                 }
                 bool prog_ok = fpga_program(fname_core.c_str());
+                fpga_link_baud_for(fname_core.c_str());
                 overlay_cursor(0, 11);
                 overlay_printf("DBG fpga_program=%d          ", prog_ok ? 1 : 0);
                 {
@@ -389,6 +400,22 @@ static void menu_options(void) {
     menu_clear();
 }
 
+// FPGA link rate for the bitstream just programmed. Every core's iosys runs 2 Mbaud except
+// NeoTang's Neo Geo CD build (neotang_cd*.bin), which runs 4 Mbaud: CD audio needs the headroom
+// (NeoTang docs/NEOCD.md). Switched here, right after programming and before anything is sent,
+// so no other core is affected. Same crystal correction as uart1's setup in utils/init.cpp.
+static void fpga_link_baud_for(const char *bitstream) {
+    const char *base = strrchr(bitstream, '/');
+    base = base ? base + 1 : bitstream;
+    uint32_t baud = (strncmp(base, "neotang_cd", 10) == 0) ? 4000000 : 2000000;
+#if !(defined(TANG_CONSOLE60K) || defined(TANG_CONSOLE138K))
+    baud = baud * 40 / 26;                  // 26 MHz XTAL boards
+#endif
+    bflb_uart_feature_control(uart1_dev, UART_CMD_SET_BAUD_RATE, baud);
+    char b[96]; snprintf(b, sizeof b, "fpga link: %lu baud for %s", (unsigned long)baud, base);
+    file_log(b);
+}
+
 // keep sending HID state to core until OSD is turned on
 static void send_hid_to_core(void) {
     uint16_t hid1_old = 0, hid2_old = 0;
@@ -423,6 +450,7 @@ static void send_hid_to_core(void) {
     // point) -- and since the OSD is the only way to switch games, this is also what makes
     // sure the old game is saved before another one loads.
     pcesave_flush_now();
+    neosave_flush_now();
 }
 
 // // (R L X A RT LT DN UP START SELECT Y B)
@@ -562,6 +590,7 @@ static void cd_serve_task(void *pvParameters)
         // gone quiet, which is exactly the stalled state worth dumping. Serving is
         // unaffected -- a queued request still wakes this immediately.
         if (xQueueReceive(cd_req_queue, &req, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            pcecd_req_t_us = req.t_us;
             if (req.is_audio)
                 pcecd_serve_audio_sector(req.lba);
             else
@@ -774,7 +803,7 @@ static void uart1_rx_task(void *pvParameters)
                     // Non-blocking on purpose: if the queue were ever full, dropping the
                     // request is still better than stalling the RX poll, which is the
                     // very failure this exists to prevent.
-                    cd_req_t req = { lba, is_audio };
+                    cd_req_t req = { lba, is_audio, (uint32_t)bflb_mtimer_get_time_us() };
                     if (cd_req_queue)
                         xQueueSend(cd_req_queue, &req, 0);
                     pos = 0;
@@ -886,6 +915,7 @@ static void main_task(void *pvParameters)
     if (find_core_for_board(fname, "monitor.bin")) {
         uart_dbg("BOOT: monitor.bin found, calling fpga_program");
         bool ok = fpga_program(fname.c_str());
+        fpga_link_baud_for(fname.c_str());
         uart_dbg(ok ? "BOOT: fpga_program returned OK" : "BOOT: fpga_program returned FAIL");
     } else {
         overlay_status("No monitor.bin found for board.");
@@ -1093,6 +1123,7 @@ int main(void)
     uart1_rx_irq_init();
     xTaskCreate(uart1_rx_task, "uart1_rx_task", UART1_RX_TASK_STACK_SIZE, NULL, UART1_RX_TASK_PRIORITY, &uart1_rx_task_handle);
     cd_req_queue = xQueueCreate(16, sizeof(cd_req_t));
+    neosave_init();                     // Neo Geo backup RAM <-> SD card, see core/neosave.cpp
     pcesave_init();                     // backup RAM <-> SD card, see core/pcesave.cpp
     xTaskCreate(cd_serve_task, "cd_serve_task", CD_SERVE_TASK_STACK_SIZE, NULL, CD_SERVE_TASK_PRIORITY, &cd_serve_task_handle);
     wifi_debug_start();     // real no-op unless built with WIFI_DEBUG=1

@@ -10,6 +10,8 @@
 // chunk/0x06 sector request), verified against 3 real .chd dumps before this was written.
 
 extern int loadpcecd(const char *fname);
+// Generic: mount `fname`, run `boot` (BIOS load + core start; 0 = ok), then send TOC + mount.
+extern int cdchd_load(const char *fname, int (*boot)(void));
 // Real, idempotent disc-eject: safe to call with nothing mounted, but always sends a
 // mount(0) frame to the FPGA -- fine for its 3 existing callers (all run once the
 // active core is already the CD core and listening), NOT fine to call blind right
@@ -28,6 +30,9 @@ extern bool pcecd_is_mounted(void);
 // 2352-byte raw CD-DA sector (direct 16-bit-LE stereo PCM, no header to strip).
 extern void pcecd_serve_sector(uint32_t lba);
 extern void pcecd_serve_audio_sector(uint32_t lba);
+// Arrival time (mtimer us) of the request being served: the audio path logs the latency from
+// here to its send (cdprog alat=avg/max). CD audio at 2 Mbaud needs it under ~1.5 ms on average.
+extern volatile uint32_t pcecd_req_t_us;
 
 // Called from cd_serve_task whenever its request queue goes quiet. Writes the per-request
 // progress ring to the SD log once per quiet period, which is how a stalled boot says
