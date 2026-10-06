@@ -46,6 +46,9 @@ extern "C" {
 #include "core/pcecd.h"
 #include "core/pcesave.h"
 #include "core/neosave.h"
+extern "C" {
+#include "mem.h"           // kfree_size(): the one heap (no PSRAM on this board)
+}
 #include "init.h"
 #include "menu_manager.h"
 #include "options_menu.h"
@@ -105,6 +108,7 @@ static QueueHandle_t cd_req_queue;
 // Highest UART1 RX FIFO occupancy ever seen, reported in pcecd's cdprog line.
 volatile uint16_t uart1_rx_hiwater = 0;
 TaskHandle_t cd_serve_task_handle;
+static TaskHandle_t log_task_handle;
 
 #ifdef TANG_CONSOLE60K
 const char *BOARD_NAME = "console60k";
@@ -257,6 +261,7 @@ FileChooser file_chooser;
 // file chosen: pwd / file_name[*choice]
 static int menu_loadrom(const char *dir) {
     string fname;
+    neosave_settle();               // a Neo Geo save still owed or running finishes first
     file_chooser.rootdir = dir;
     file_chooser.curdir = dir;
     file_chooser.msg_return = "<< Return to main menu";
@@ -450,7 +455,16 @@ static void send_hid_to_core(void) {
     // point) -- and since the OSD is the only way to switch games, this is also what makes
     // sure the old game is saved before another one loads.
     pcesave_flush_now();
-    neosave_flush_now();
+    neosave_flush_async();          // Neo Geo: on the save task, so the OSD opens at once
+    {   // Stack peaks (unused bytes, lowest so far) and free heap, to size the tasks from data.
+        auto unused = [](TaskHandle_t t) -> unsigned {
+            return t ? (unsigned)(uxTaskGetStackHighWaterMark(t) * sizeof(StackType_t)) : 0; };
+        char b[160];
+        snprintf(b, sizeof b, "stacks unused (bytes): main=%u uart1_rx=%u cd_serve=%u save=%u log=%u heap free=%u",
+                 unused(main_task_handle), unused(uart1_rx_task_handle), unused(cd_serve_task_handle),
+                 unused(pcesave_task_handle()), unused(log_task_handle), (unsigned)kfree_size());
+        file_log(b);
+    }
 }
 
 // // (R L X A RT LT DN UP START SELECT Y B)
@@ -1116,7 +1130,7 @@ int main(void)
     // Logger first: file_log() falls back to a direct (blocking) write while
     // log_queue is NULL, so create it before anything that logs.
     log_queue = xQueueCreate(LOG_QUEUE_LEN, LOG_LINE_MAX);
-    xTaskCreate(log_task, "log_task", LOG_TASK_STACK_SIZE, NULL, LOG_TASK_PRIORITY, NULL);
+    xTaskCreate(log_task, "log_task", LOG_TASK_STACK_SIZE, NULL, LOG_TASK_PRIORITY, &log_task_handle);
     xTaskCreate(main_task, "main_task", MAIN_TASK_STACK_SIZE, NULL, MAIN_TASK_PRIORITY, &main_task_handle);
     // Arm interrupt-driven RX before the parser task runs, so no byte arrives while the
     // FIFO is still unattended. See uart1_isr's comment for why polling was not enough.

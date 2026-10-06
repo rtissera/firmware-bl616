@@ -189,6 +189,8 @@ void pcesave_flush_now(void) {
 static void pcesave_task(void *) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);                    // the game wrote backup RAM
+        // The Neo Geo OSD asked for a save (neosave_flush_async): now, not after the debounce.
+        if (neosave_active() && neosave_flush_requested()) { neosave_flush_now(); continue; }
         // Debounce: wait until it has been quiet for 2 s, so one save covers a whole burst.
         while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000)) > 0) {}
         // One task for both savers: a Neo Geo game or a PC Engine game owns the channel,
