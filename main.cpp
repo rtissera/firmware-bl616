@@ -873,6 +873,11 @@ static void uart1_rx_task(void *pvParameters)
             } else {
                 pos = 0; // Reset if we get out of sync
             }
+            // Drain the ring before sleeping. The 1 ms delay below used to run after EVERY
+            // byte, so the FPGA's bytes were consumed at 1 per tick: a 515-byte save block
+            // took ~0.5 s (a cart save ~150 s), and joypad frames queued behind it -- the
+            // OSD key was seen late or missed.
+            continue;
         }
 
         // Idle path of the RX task -- reached only when no byte is pending. This task
