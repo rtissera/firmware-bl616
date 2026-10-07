@@ -9,6 +9,9 @@ void neosave_init(void);                        // create the save task; call on
 void neosave_set_game(const char *fname, bool cd);
 void neosave_restore(void);                     // send the save into the FPGA; core must not run yet
 void neosave_flush_now(void);                   // save now if the game wrote since the last save
+void neosave_flush_async(void);                 // same, on the save task: the OSD opens without waiting
+bool neosave_flush_requested(void);             // the save task: an async flush is owed
+void neosave_settle(void);                      // before any load: finish an owed or running flush
 bool neosave_active(void);                      // a Neo Geo game owns the save channel
 void neosave_off(void);                         // another core's game took the channel
 

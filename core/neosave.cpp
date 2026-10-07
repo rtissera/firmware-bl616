@@ -40,6 +40,7 @@ static bool     ns_on = false;
 static SemaphoreHandle_t ns_mutex, ns_blk_sem;
 static volatile uint16_t ns_rx_blk = 0xFFFF;
 static volatile bool ns_dirty = false;           // set only by the FPGA's 0x0B notice
+static volatile bool ns_flush_req = false;       // neosave_flush_async() owes a flush
 
 static void ns_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void ns_log(const char *fmt, ...) {
@@ -93,6 +94,24 @@ static bool ns_fetch_block(uint16_t blk) {                          // 0x14 -> n
 }
 
 // ---- API ----
+// The in-game OSD used to wait for the whole dump (144 blocks on a cart, ~0.5 s at 2 Mbaud,
+// more when the file is rewritten) before it appeared. Now the OSD opens at once and the
+// save task does the flush; neosave_settle() runs before anything loads, so a flush still
+// owed or in progress always finishes while the RAM still holds this game.
+void neosave_flush_async(void) {
+    if (!ns_on || !ns_dirty) return;
+    ns_flush_req = true;
+    TaskHandle_t t = pcesave_task_handle();
+    if (t) xTaskNotifyGive(t);
+}
+bool neosave_flush_requested(void) { return ns_flush_req; }
+void neosave_settle(void) {
+    if (!ns_mutex) return;
+    if (ns_flush_req) neosave_flush_now();                          // owed: do it here
+    xSemaphoreTake(ns_mutex, portMAX_DELAY);                        // running: wait it out
+    xSemaphoreGive(ns_mutex);
+}
+
 void neosave_set_game(const char *fname, bool cd) {
     if (!ns_mutex) return;
     xSemaphoreTake(ns_mutex, portMAX_DELAY);
@@ -137,8 +156,10 @@ void neosave_restore(void) {
 }
 
 void neosave_flush_now(void) {
-    if (!ns_mutex || !ns_on || !ns_dirty) return;
+    if (!ns_mutex || !ns_on || !ns_dirty) { ns_flush_req = false; return; }
     if (xSemaphoreTake(ns_mutex, pdMS_TO_TICKS(3000)) != pdTRUE) return;
+    ns_flush_req = false;
+    TickType_t t0 = xTaskGetTickCount();
     // Clear BEFORE the dump: the FPGA clears its flag when block 0 is requested (cart), and a
     // write during the dump sends a fresh 0x0B that sets this again.
     ns_dirty = false;
@@ -172,7 +193,8 @@ void neosave_flush_now(void) {
                 if (f_rename(tmp, ns_path) != FR_OK) { ns_log("neosave: rename to %s failed", ns_path); ok = false; }
                 else {
                     for (uint16_t i = 0; i < ns_count; i++) ns_sum[ns_first + i] = sum[ns_first + i];
-                    ns_log("neosave: saved %s", ns_path);
+                    ns_log("neosave: saved %s (%lu ms)", ns_path,
+                           (unsigned long)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS));
                 }
             } else ns_log("neosave: write to %s failed", tmp);
         }

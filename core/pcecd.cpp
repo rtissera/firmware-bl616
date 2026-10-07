@@ -557,6 +557,7 @@ static void pcecd_trace_reset(void) {
     pcecd_req_count = 0;
     pcecd_hunk_reads = 0;
     pcecd_next_report = 1;
+    pcecd_alat_max = 0; pcecd_alat_n = 0; pcecd_alat_sum = 0;   // per disc, like the counters above
     pcecd_ring_used = 0;
     pcecd_ring_cur = -1;
     pcecd_ring_flushed = 0;
