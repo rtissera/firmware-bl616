@@ -455,8 +455,8 @@ static void send_hid_to_core(void) {
     // point) -- and since the OSD is the only way to switch games, this is also what makes
     // sure the old game is saved before another one loads.
     pcesave_flush_now();
-    {   // Synchronous again: on the save task (neosave_flush_async) a cart save took ~153 s on
-        // hardware, ~1 s per block, cause not yet known. Timed here to size the OSD lag.
+    {   // Synchronous: a cart save takes ~1 s (it took ~150 s while uart1_rx slept after every
+        // byte, see there). Usually 0 ms: the save task has already flushed.
         TickType_t t0 = xTaskGetTickCount();
         neosave_flush_now();
         char b[64]; snprintf(b, sizeof b, "osd: save on open took %lu ms",
